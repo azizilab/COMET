@@ -1,0 +1,16 @@
+{
+  "gene_space": {
+    "mean_cosine": 0.3060348689969536,
+    "fraction_positive": 0.9154228855721394,
+    "n_valid": 1005.0
+  },
+  "pca_space": {
+    "mean_cosine": 0.24373577477224914,
+    "fraction_positive": 0.7616683217477657,
+    "n_valid": 1007.0
+  },
+  "v_norm_pseudotime_spearman": {
+    "rho": 0.02725047978822988,
+    "pval": 0.38114433483556465
+  }
+}

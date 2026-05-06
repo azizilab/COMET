@@ -1,0 +1,12 @@
+{
+  "gene_space": {
+    "mean_cosine": 0.005887746318071609,
+    "fraction_positive": 0.5064676616915423,
+    "n_valid": 1005.0
+  },
+  "umap_space": {
+    "mean_cosine": -0.07068172060916209,
+    "fraction_positive": 0.45084409136047665,
+    "n_valid": 1007.0
+  }
+}

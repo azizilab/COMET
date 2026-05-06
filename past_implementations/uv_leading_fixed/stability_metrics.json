@@ -1,0 +1,7 @@
+{
+  "mean_edge_jaccard": 0.8968280763526366,
+  "std_edge_jaccard": 0.016011848530710977,
+  "n_pairs": 10,
+  "mean_module_conservation": 1.0,
+  "std_module_conservation": 0.0
+}

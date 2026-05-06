@@ -1,0 +1,17 @@
+{
+  "n_common_genes": 2995,
+  "n_common_tfs": 277,
+  "global_spearman_nonzero": 0.45992177465620443,
+  "global_spearman_p": 0.0,
+  "n_nonzero_entries": 270940,
+  "per_tf_spearman_mean": 0.8722805864466368,
+  "per_tf_spearman_std": 0.07631457810094955,
+  "per_tf_spearman_frac_pos": 1.0,
+  "per_tf_jaccard_top5pct": 0.2544829648410091,
+  "per_tf_jaccard_top10pct": 0.38020452747600536,
+  "per_tf_jaccard_top20pct": 0.5869391236309158,
+  "hub_tf_spearman": 0.35118889663030206,
+  "sign_agreement": 0.4645848103089422,
+  "module_conservation_mean": 1.0,
+  "module_conservation_std": 0.0
+}

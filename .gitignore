@@ -1,0 +1,41 @@
+# ---- Large scientific data (anywhere in repo) ----
+*.npy
+*.mtx
+*.mtx.gz
+*.tsv.gz
+*.rds
+*.h5ad
+
+# ---- Large compressed files ----
+*.gz
+*.zip
+*.tar
+*.bz2
+
+# ---- Logs ----
+*.log
+
+# ---- Python cache ----
+__pycache__/
+*.pyc
+
+# ---- Jupyter checkpoints ----
+.ipynb_checkpoints/
+
+# ---- OS junk ----
+.DS_Store
+
+# ---- large CellOracle / GRN outputs ----
+cell_oracle_run/*.csv
+cell_oracle_run/*.links
+cell_oracle_run/*.npy
+cell_oracle_run/*.mtx
+cell_oracle_run/*.rds
+cell_oracle_run/*.h5ad
+cell_oracle_run/celloracle_base_grn_hematopoiesis.csv
+cell_oracle_run/links_hematopoiesis.celloracle.links
+
+cell_oracle_run/*.oracle
+cell_oracle_run/grn_clusters/
+cell_oracle_run/*.csv
+cell_oracle_run/*.links
