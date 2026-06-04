@@ -1,11 +1,6 @@
-from config import DATA, TRAIN, MODEL
-from data.load import *
-
-#from model.grn import GRNDictionary
-#from model.encoder import CellStateEncoder
-#from model.velocity import DictVelocityHead
-#from losses.grn_losses import masked_reconstruction_loss
-#from losses.velocity_losses import velocity_consistency_loss
+from config import DATA, MODEL, TRAIN
+from data.load import load_datasets, build_universe, build_M, build_gene_priors, build_tf_access_prior
+from training.training_loop import run_training
 
 def main():
 
@@ -55,6 +50,7 @@ def main():
     )
 
     data = {
+        **raw,
         **universe,
         **M_bundle,
         **gene_prior_bundle,
@@ -62,6 +58,9 @@ def main():
     }
     print("Data loading complete.")
 
+    outputs = run_training(data, MODEL, TRAIN)
+
+    return outputs
 
 
 if __name__ == "__main__":

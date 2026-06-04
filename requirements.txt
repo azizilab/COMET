@@ -4,3 +4,5 @@ scipy
 anndata
 torch
 scikit-learn
+matplotlib
+pillow

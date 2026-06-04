@@ -18,6 +18,7 @@ def load_datasets(config):
         "peaks": pd.read_csv(config["peaks"], header=None)[0].astype(str).tolist(),
         "atac_X": scipy.io.mmread(config["atac"]).tocsr().T.astype(np.float32),  # cells x peaks
         "peaks_atac": pd.read_csv(config["atac_peaks"], sep="\t"),
+        "decipher_outputs": np.load(config["decipher_outputs"]),
     }
 
 
