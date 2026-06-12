@@ -26,49 +26,49 @@ def project_to_2d(V_pred_full, X_2d_vis, X_full,
     else:
         density_factor = np.ones(N, dtype=np.float32)
 
-    # Gene-space displacements: (N, k, G)
-    d_high = X_full[idx] - X_full[:, np.newaxis, :]        # (N, k, G)
+    # Gene-space displacements: (C, k, G)
+    d_high = X_full[idx] - X_full[:, np.newaxis, :]        # (C, k, G)
 
-    # 2D displacements: (N, k, 2)
-    d_low  = X_2d_vis[idx] - X_2d_vis[:, np.newaxis, :]   # (N, k, 2)
+    # 2D displacements: (C, k, 2)
+    d_low  = X_2d_vis[idx] - X_2d_vis[:, np.newaxis, :]   # (C, k, 2)
 
     # Cosine similarity — vectorised dot product
-    # v: (N, G), d_high: (N, k, G)
-    v_norm = np.linalg.norm(V_pred_full, axis=1, keepdims=True) + 1e-8   # (N, 1)
-    d_norm = np.linalg.norm(d_high, axis=2) + 1e-8                        # (N, k)
+    # v: (C, G), d_high: (C, k, G)
+    v_norm = np.linalg.norm(V_pred_full, axis=1, keepdims=True) + 1e-8   # (C, 1)
+    d_norm = np.linalg.norm(d_high, axis=2) + 1e-8                        # (C, k)
 
     # dot(d_high[i,j], v[i]) = einsum over G
-    dots = np.einsum('ng,nkg->nk', V_pred_full, d_high)   # (N, k)
-    sims = dots / (d_norm * v_norm)                         # (N, k)
+    dots = np.einsum('ng,nkg->nk', V_pred_full, d_high)   # (C, k)
+    sims = dots / (d_norm * v_norm)                         # (C, k)
 
     # Center per cell
-    sims_centered = sims - sims.mean(axis=1, keepdims=True)   # (N, k)
+    sims_centered = sims - sims.mean(axis=1, keepdims=True)   # (C, k)
 
     # Adaptive softmax
-    eff_scale = (scale * density_factor)[:, np.newaxis]        # (N, 1)
-    weights = np.exp(sims_centered * eff_scale)                # (N, k)
-    weights /= weights.sum(axis=1, keepdims=True) + 1e-8       # (N, k)
+    eff_scale = (scale * density_factor)[:, np.newaxis]        # (C, 1)
+    weights = np.exp(sims_centered * eff_scale)                # (C, k)
+    weights /= weights.sum(axis=1, keepdims=True) + 1e-8       # (C, k)
 
     # Zero out cells with near-zero velocity
-    zero_vel = np.linalg.norm(V_pred_full, axis=1) < 1e-8     # (N,)
+    zero_vel = np.linalg.norm(V_pred_full, axis=1) < 1e-8     # (C,)
     weights[zero_vel] = 0.0
 
-    # Weighted sum of 2D displacements: (N, k) x (N, k, 2) -> (N, 2)
+    # Weighted sum of 2D displacements: (C, k) x (C, k, 2) -> (C, 2)
     V_emb2 = np.einsum('nk,nkd->nd', weights, d_low).astype(np.float32)
 
     return V_emb2
 
 
 def build_local_atac(
-    X_rna,            # (N_rna, G)  RNA expression (subset genes)
-    gene_activity,    # (N_atac, G) ATAC gene-activity matrix
-    rna_2d,           # (N_rna, 2)  e.g. V_dec2 or X_pca2d
+    X_rna,            # (C_rna, G)  RNA expression (subset genes)
+    gene_activity,    # (C_atac, G) ATAC gene-activity matrix
+    rna_2d,           # (C_rna, 2)  e.g. V_dec2 or X_pca2d
     n_clusters=15,
     k_atac=5,         # ATAC cells per RNA cluster to average
     random_state=42,
 ):
     """
-    Returns local_gene_access: (N_rna, G) — per-cell ATAC accessibility
+    Returns local_gene_access: (C_rna, G) — per-cell ATAC accessibility
     estimated from the nearest ATAC cluster.
  
     Strategy
@@ -115,7 +115,7 @@ def build_local_atac(
         cluster_access[c] = gene_activity[atac_idx[c]].mean(axis=0)
  
     # 6. Assign back to RNA cells
-    local_gene_access = cluster_access[cluster_labels]   # (N_rna, G)
+    local_gene_access = cluster_access[cluster_labels]   # (C_rna, G)
  
     # 7. Normalize to [0,1] per gene across clusters (for use in atac_direction_loss)
     lo = local_gene_access.min(axis=0, keepdims=True)

@@ -15,7 +15,6 @@ def main():
         raw["peaks_atac"],
     )
 
-    
     # accessibility mask M
     M_bundle = build_M(
         raw["peaks"],
@@ -56,6 +55,7 @@ def main():
         **gene_prior_bundle,
         "TF_access_prior": TF_access_prior,
     }
+    
     print("Data loading complete.")
 
     outputs = run_training(data, MODEL, TRAIN)

@@ -1,11 +1,10 @@
-from model.encoder import *
-from model.grn import *
-from model.velocity import *
-from model.ld_vae import *
-from utils.graph import *
-from utils.geometry import *
-from utils.metrics import *
-from viz.visualization import *
+from model.encoder import CellStateEncoder
+from model.grn import GRNDictionary, initialize_grn_dictionary_from_clusters, masked_reconstruction_loss
+from model.velocity import DictVelocityHead, velocity_consistency_loss, atac_direction_loss, atac_direction_loss_asymmetric, velocity_smoothness_loss, density_gradient_loss, divergence_loss
+from model.ld_vae import LinearDecoder, plot_ld_embedding
+from utils.graph import build_neighbor_index
+from utils.geometry import project_to_2d, build_local_atac
+from viz.visualization import VelocityGIFMaker
 
 import os
 import numpy as np
@@ -16,50 +15,56 @@ from torch.utils.data import TensorDataset, DataLoader, RandomSampler
 
 def run_training(data, model_config, train_config):
 
-    X = data["X"]
-    X_TF = data["X_TF"]
-    A_genes = data["A_genes"]
-    A_tfs = data["A_tfs"]
-    sub_g2i = data["sub_g2i"]
-    M = data["M"]
-    gene_activity = data["gene_activity"]
-    gene_access = data["gene_access"]
-    gene_access_t = data["gene_access_t"]
-    gene_idx = data["gene_idx"]
-    tf_idx = data["tf_idx"]
-    TF_access_prior = data["TF_access_prior"]
-    rna_adata = data["rna_adata"]
+    X = data["X"] # normalised scRNA-seq expression matrix (C x G)
+    X_TF = data["X_TF"] # TF-expression sub-matrix (C x T)
 
+    M = data["M"] # binary motif mask (G x T), M_gt=1 iff TF t has a binding motif in a peak linked to gene g
+
+    gene_activity = data["gene_activity"] # per-cell local chromatin accessibility (C x G) 
+    gene_access = data["gene_access"] # population-mean chromatin accessibility for each gene (G,)
+    gene_access_t = data["gene_access_t"] # as tensor
+
+    TF_access_prior = data["TF_access_prior"] # population-mean chromatin accessibility for each TF locus (T,)
     TF_access_t = torch.tensor(TF_access_prior, dtype=torch.float32)
 
-    # Run this once before starting training
+    # identity sets for genes and TFs (i.e. active "universe")
+    A_genes = data["A_genes"]
+    A_tfs = data["A_tfs"]
+
+    # index mappings
+    gene_idx = data["gene_idx"]
+    tf_idx = data["tf_idx"]
+    sub_g2i = data["sub_g2i"]
+
+    rna_adata = data["rna_adata"] # raw AnnData object for RNA, used for pseudotime and plotting only (not model input)
+
+    
+    # Run once before starting training
     # Find the local index of each TF within the A_genes list
     tf_indices_in_G = []
     for tf_name in A_tfs:
         if tf_name in sub_g2i:
             tf_indices_in_G.append(sub_g2i[tf_name])
         else:
-            # This shouldn't happen based on your A_tfs filtering, but for safety:
+            # This shouldn't happen based on A_tfs filtering, but for safety:
             tf_indices_in_G.append(-1) 
 
     tf_indices_in_G = torch.tensor(tf_indices_in_G, dtype=torch.long)
 
 
-
     decipher_data = data["decipher_outputs"]
-    Z_dec   = decipher_data["z"].astype(np.float32)   # (N, 10)
-    V_dec2  = decipher_data["v"].astype(np.float32)   # (N, 2)
+    Z_dec   = decipher_data["z"].astype(np.float32)   # (C, 10)
+    V_dec2  = decipher_data["v"].astype(np.float32)   # (C, 2)
 
     USE_LOCAL_ATAC = train_config["USE_LOCAL_ATAC"]
 
     if USE_LOCAL_ATAC:
-        # This assumes 'gene_activity' is your (N_atac, G) matrix
+        # This assumes 'gene_activity' is your (C_atac, G) matrix
         local_access, _ = build_local_atac(X, gene_activity, V_dec2, n_clusters=train_config["N_CLUSTERS"]) # number of GRN dictionary atoms)
         gene_access_t = torch.tensor(local_access, dtype=torch.float32)
     else:
         # Fallback to your existing global vector (G,)
         gene_access_t = torch.tensor(gene_access, dtype=torch.float32)
-
 
 
     # --- SET NUMBER OF RUNS & PHASES HERE ---
@@ -70,8 +75,8 @@ def run_training(data, model_config, train_config):
     D_ATOMS = model_config["D_ATOMS"] # number of GRN dictionary atoms
     # ----------------------------------------
     
-    # ── data prep ────────────────────────────────────────────────────────────
 
+    # ── data prep ────────────────────────────────────────────────────────────
     G = X.shape[1]
     T = X_TF.shape[1]
     
@@ -145,6 +150,7 @@ def run_training(data, model_config, train_config):
         print(f"Phase 1: GRN+Encoder warmup for {PHASE1_EPOCHS} epochs")
         print(f"Phase 2: Joint training for {N_EPOCHS - PHASE1_EPOCHS} epochs")
     
+
         # ── model construction ────────────────────────────────────────────────
         grn = GRNDictionary(G=G, T=T, M=M, D=D_ATOMS)
         grn.TF_access = TF_access_t.clone()
@@ -283,7 +289,7 @@ def run_training(data, model_config, train_config):
                                 W2_SPARSE  * l_sparse  +
                                 W2_ACCESS  * l_access  +
                                 W2_DIVERSE * l_diverse +
-                                W1_ENTROPY * l_entropy +
+                                W2_ENTROPY * l_entropy +
                                 W2_LD      * l_ld      +
                                 W2_LD_REG  * l_ld_reg)
 
@@ -331,12 +337,11 @@ def run_training(data, model_config, train_config):
             all_mix_weights = full_weights.cpu().numpy()
             steady_full  = steady_full.cpu().numpy()
             
-            h_full   = cell_encoder.encoder(X_t)           # (N, 64)
+            h_full   = cell_encoder.encoder(X_t)           # (C, 64)
             z_2d_full, _ = ld_decoder.forward(h_full)
             z_2d_np  = z_2d_full.cpu().numpy()
             gene_loadings = ld_decoder.get_gene_loadings()  # (G, 2)
     
-        base_path = train_config["OUTPUT_DIR"]
         target_dirs = [base_path] if NUM_RUNS == 1 else [os.path.join(base_path, f"run{run_i}")]
         if NUM_RUNS > 1 and run_i == 0:
             target_dirs.append(base_path)
@@ -345,7 +350,7 @@ def run_training(data, model_config, train_config):
             os.makedirs(d, exist_ok=True)
             np.save(f"{d}/V_pred.npy",        V_pred)
             np.save(f"{d}/A_dict.npy",        A_dict_np)          # (D, G, T) atom bank
-            np.save(f"{d}/mix_weights.npy",   all_mix_weights)    # (N, D) per-cell
+            np.save(f"{d}/mix_weights.npy",   all_mix_weights)    # (C, D) per-cell
             np.save(f"{d}/steady_state.npy",  steady_full)
             np.save(f"{d}/A_genes.npy",       A_genes)
             np.save(f"{d}/A_tfs.npy",         A_tfs)
@@ -362,16 +367,16 @@ def run_training(data, model_config, train_config):
 
     with torch.no_grad():
         # --- RNA cells ---
-        h_rna = cell_encoder.encoder(X_t)           # (N_rna, 64)
+        h_rna = cell_encoder.encoder(X_t)           # (C_rna, 64)
         z_rna, _ = ld_decoder(h_rna)
-        z_rna = z_rna.cpu().numpy()                  # (N_rna, 2)
+        z_rna = z_rna.cpu().numpy()                  # (C_rna, 2)
 
         # --- ATAC cells: project gene_activity through the same encoder ---
-        # gene_activity is (N_atac, G) — same gene space as X, so encoder applies directly
+        # gene_activity is (C_atac, G) — same gene space as X, so encoder applies directly
         gene_act_t = torch.tensor(gene_activity, dtype=torch.float32)
-        h_atac = cell_encoder.encoder(gene_act_t)    # (N_atac, 64)
+        h_atac = cell_encoder.encoder(gene_act_t)    # (C_atac, 64)
         z_atac, _ = ld_decoder(h_atac)
-        z_atac = z_atac.cpu().numpy()                # (N_atac, 2)
+        z_atac = z_atac.cpu().numpy()                # (C_atac, 2)
 
         # --- Center and scale for plotting (doesn't affect saved z_2d_np) ---
         # We fit scaler on RNA only so RNA occupies the center; ATAC is transformed consistently

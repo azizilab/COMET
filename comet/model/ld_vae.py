@@ -63,11 +63,11 @@ class LinearDecoder(nn.Module):
         return self.W_dec.weight.detach().cpu().numpy()
 
 def plot_ld_embedding(
-    z_2d_rna: np.ndarray,         # (N_rna, 2)
-    pseudo_norm: np.ndarray,       # (N_rna,) pseudotime 0–1
+    z_2d_rna: np.ndarray,         # (C_rna, 2)
+    pseudo_norm: np.ndarray,       # (C_rna,) pseudotime 0–1
     gene_loadings: np.ndarray,     # (G, 2)
     A_genes: np.ndarray,           # (G,) gene names
-    z_2d_atac: np.ndarray = None,  # (N_atac, 2) — optional
+    z_2d_atac: np.ndarray = None,  # (C_atac, 2) — optional
     highlight_genes: list = None,
     n_arrow_genes: int = 15,       # how many gene arrows to show
     save_path: str = None,

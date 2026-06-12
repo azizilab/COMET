@@ -6,56 +6,6 @@ import torch.nn.functional as F
 
 from sklearn.cluster import KMeans
 
-def initialize_grn_dictionary_from_clusters(
-    X: np.ndarray,          # (N, G) RNA
-    V_dec2: np.ndarray,     # (N, 2) for clustering
-    M: np.ndarray,          # (G, T) motif mask
-    D: int,                 # number of atoms
-    A_tfs: np.ndarray,
-    sub_g2i: dict,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Returns:
-      cluster_labels : (N,) int — which cluster each cell belongs to
-      W_init         : (D, G, T) float32 — per-atom initial weights
-    """
-    # 1. Cluster in Decipher space (already a good low-dim representation)
-    print(f"Clustering into {D} groups in Decipher space...")
-    km = KMeans(n_clusters=D, random_state=42, n_init=10)
-    cluster_labels = km.fit_predict(V_dec2)
-    
-    # 2. For each cluster, find marker genes (high mean, low in others)
-    W_init = np.zeros((D, X.shape[1], len(A_tfs)), dtype=np.float32)
-    
-    for d in range(D):
-        in_mask  = cluster_labels == d
-        out_mask = ~in_mask
-        
-        if in_mask.sum() < 3:
-            continue
-        
-        # Mean expression inside vs outside this cluster
-        mean_in  = X[in_mask].mean(axis=0)    # (G,)
-        mean_out = X[out_mask].mean(axis=0)   # (G,)
-        
-        # Log fold change as a simple specificity score
-        lfc = np.log1p(mean_in) - np.log1p(mean_out)  # (G,)
-        
-        # Initialize weights for this atom proportional to cluster-specific LFC
-        # Only where motif mask allows (M > 0)
-        for t_i in range(len(A_tfs)):
-            col = M[:, t_i]                   # (G,) binary motif mask
-            if col.sum() == 0:
-                continue
-            # Weight = LFC scaled to [-0.3, 0.3] within motif-allowed genes
-            lfc_masked = lfc * col
-            lfc_range  = np.abs(lfc_masked).max() + 1e-8
-            W_init[d, :, t_i] = lfc_masked / lfc_range * 0.3
-    
-    print(f"Cluster sizes: {[int((cluster_labels==d).sum()) for d in range(D)]}")
-    return cluster_labels, W_init
-
-
 class GRNDictionary(nn.Module):
     def __init__(self, G: int, T: int, M: np.ndarray, D: int = 4):
         super().__init__()
@@ -122,14 +72,14 @@ class GRNDictionary(nn.Module):
           two atoms with different weights but correlated outputs are
           biologically redundant.
         """
-        # Part 1: parameter space (original)
+        # Part 1: parameter space 
         A_flat = self.A_dict.reshape(self.D, -1)       # (D, G*T)
         A_norm = F.normalize(A_flat, dim=1)
         gram   = A_norm @ A_norm.T                     # (D, D)
         eye    = torch.eye(self.D, device=gram.device)
         param_div = (gram * (1 - eye)).abs().mean()
         
-        # Part 2: prediction space (NEW)
+        # Part 2: prediction space 
         # Evaluate each atom on mean TF input -> (D, G)
         tf_mean = self.mean_tf.unsqueeze(0)             # (1, T)
         pred_per_atom = torch.einsum(
@@ -152,6 +102,55 @@ class GRNDictionary(nn.Module):
         return ((col_norms - target.unsqueeze(0)) ** 2).mean()
     
 
+
+def initialize_grn_dictionary_from_clusters(
+    X: np.ndarray,          # (C, G) RNA
+    V_dec2: np.ndarray,     # (C, 2) for clustering
+    M: np.ndarray,          # (G, T) motif mask
+    D: int,                 # number of atoms
+    A_tfs: np.ndarray,
+    sub_g2i: dict,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Returns:
+      cluster_labels : (C,) int — which cluster each cell belongs to
+      W_init         : (D, G, T) float32 — per-atom initial weights
+    """
+    # 1. Cluster in Decipher space (already a good low-dim representation)
+    print(f"Clustering into {D} groups in Decipher space...")
+    km = KMeans(n_clusters=D, random_state=42, n_init=10)
+    cluster_labels = km.fit_predict(V_dec2)
+    
+    # 2. For each cluster, find marker genes (high mean, low in others)
+    W_init = np.zeros((D, X.shape[1], len(A_tfs)), dtype=np.float32)
+    
+    for d in range(D):
+        in_mask  = cluster_labels == d
+        out_mask = ~in_mask
+        
+        if in_mask.sum() < 3:
+            continue
+        
+        # Mean expression inside vs outside this cluster
+        mean_in  = X[in_mask].mean(axis=0)    # (G,)
+        mean_out = X[out_mask].mean(axis=0)   # (G,)
+        
+        # Log fold change as a simple specificity score
+        lfc = np.log1p(mean_in) - np.log1p(mean_out)  # (G,)
+        
+        # Initialize weights for this atom proportional to cluster-specific LFC
+        # Only where motif mask allows (M > 0)
+        for t_i in range(len(A_tfs)):
+            col = M[:, t_i]                   # (G,) binary motif mask
+            if col.sum() == 0:
+                continue
+            # Weight = LFC scaled to [-0.3, 0.3] within motif-allowed genes
+            lfc_masked = lfc * col
+            lfc_range  = np.abs(lfc_masked).max() + 1e-8
+            W_init[d, :, t_i] = lfc_masked / lfc_range * 0.3
+    
+    print(f"Cluster sizes: {[int((cluster_labels==d).sum()) for d in range(D)]}")
+    return cluster_labels, W_init
 
 
 # ═══════════════════════════════════════════════════════════════════════════
