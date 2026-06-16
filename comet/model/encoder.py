@@ -67,7 +67,7 @@ class CellStateEncoder(nn.Module):
         with torch.no_grad():
             return self.forward(rna).argmax(dim=1)
 
-    def dirichlet_sharpening_loss(self, weights: torch.Tensor,
+    def dirichlet_sharpening_loss(self, weights: torch.Tensor, #not used, as of now -- entropy loss used instead
                                    alpha: float = 0.1) -> torch.Tensor:
         """
         Sparse Dirichlet prior: log p(w | alpha) with alpha < 1.

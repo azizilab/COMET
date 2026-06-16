@@ -48,6 +48,7 @@ TRAIN = {
         "ACCESS": 0.1,
         "SMOOTH": 0.01,
         "DIVERSE": 5.0,
+        "ENTROPY": 1.0,
         "DENSE": 0.05,
         "DIV": 0.5,
         "SOURCE": 1.0,

@@ -116,6 +116,7 @@ def run_training(data, model_config, train_config):
     W2_ACCESS  = W2["ACCESS"]
     W2_SMOOTH  = W2["SMOOTH"]
     W2_DIVERSE = W2["DIVERSE"]
+    W2_ENTROPY = W2["ENTROPY"]
     W2_DENSE   = W2["DENSE"]
     W2_DIV     = W2["DIV"]
     W2_SOURCE  = W2["SOURCE"]
