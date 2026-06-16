@@ -6,3 +6,5 @@ torch
 scikit-learn
 matplotlib
 pillow
+seaborn
+scanpy

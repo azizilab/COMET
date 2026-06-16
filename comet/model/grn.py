@@ -96,11 +96,6 @@ class GRNDictionary(nn.Module):
         return (torch.abs(self.A_dict) * 
                 closed.unsqueeze(0).unsqueeze(0)).mean()
     
-    def per_tf_norm_loss(self) -> torch.Tensor:
-        col_norms = torch.norm(self.A_dict, dim=1)    # (D, T)
-        target    = (self.M.sum(dim=0).clamp(min=1) ** 0.5) * 0.1
-        return ((col_norms - target.unsqueeze(0)) ** 2).mean()
-    
 
 
 def initialize_grn_dictionary_from_clusters(
@@ -170,7 +165,7 @@ def initialize_grn_dictionary_from_clusters(
 #   *structure* of co-variation across cells, not from a labelled target.
  
 def masked_reconstruction_loss(grn, mix_weights, rna_batch, tf_batch,
-                                tf_indices_in_G, mask_frac=0.40):
+                                tf_indices_in_G, mask_frac=0.30):
     """
     mix_weights : (B, D) — already computed by caller, do NOT recompute encoder.
     Removing the redundant encoder forward pass saves ~15% of Phase 1 time.

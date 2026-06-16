@@ -9,16 +9,28 @@ from sklearn.preprocessing import normalize
 
 
 def load_datasets(config):
+    decipher_npz  = np.load(config["decipher_outputs"])
+    _required_keys = {"z", "v"}
+    _missing_keys  = _required_keys - set(decipher_npz.keys())
+    if _missing_keys:
+        raise KeyError(
+            f"decipher_embeddings.npz is missing required keys: {sorted(_missing_keys)}.\n"
+            f"  Found keys: {sorted(decipher_npz.keys())}\n"
+            "  The .npz must contain:\n"
+            "    'z' — Decipher latent representation, shape (N, 10)\n"
+            "    'v' — Decipher 2-D vis-space coordinates, shape (N, 2)\n"
+            "  Cell order must match velten_rna.h5ad rows exactly."
+        )
 
     return {
-        "rna_adata": ad.read_h5ad(config["rna"]), # cells x genes, w/ metadata
-        "peak_tf": scipy.io.mmread(config["peak_tf"]).tocsr(), # peaks x TFs
-        "motif_tf_names": open(config["tf_names"]).read().strip().split(), # ordered list of TF names corresponding to columns of peak_tf
-        "peak_gene": pd.read_csv(config["peak_gene"], sep="\t"), # table with columns: peak, gene
-        "peaks": pd.read_csv(config["peaks"], header=None)[0].astype(str).tolist(), # master list of peak identifiers
-        "atac_X": scipy.io.mmread(config["atac"]).tocsr().T.astype(np.float32),  # cells x peaks 
-        "peaks_atac": pd.read_csv(config["atac_peaks"], sep="\t"),
-        "decipher_outputs": np.load(config["decipher_outputs"]),
+        "rna_adata":       ad.read_h5ad(config["rna"]),
+        "peak_tf":         scipy.io.mmread(config["peak_tf"]).tocsr(),
+        "motif_tf_names":  open(config["tf_names"]).read().strip().split(),
+        "peak_gene":       pd.read_csv(config["peak_gene"], sep="\t"),
+        "peaks":           pd.read_csv(config["peaks"], header=None)[0].astype(str).tolist(),
+        "atac_X":          scipy.io.mmread(config["atac"]).tocsr().T.astype(np.float32),
+        "peaks_atac":      pd.read_csv(config["atac_peaks"], sep="\t"),
+        "decipher_outputs":decipher_npz,
     }
 
 

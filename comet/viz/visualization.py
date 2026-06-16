@@ -103,7 +103,7 @@ class VelocityGIFMaker:
             Xg, Yg, U, W,
             color="black", density=1.2,
             linewidth=1, arrowsize=1, arrowstyle='-|>',
-            minlength=0.2, integration_direction='both', zorder=3
+            minlength=0.2, integration_direction='forward', zorder=3
         )
  
         mode_label = self.mode
