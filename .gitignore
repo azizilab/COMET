@@ -39,3 +39,6 @@ cell_oracle_run/*.oracle
 cell_oracle_run/grn_clusters/
 cell_oracle_run/*.csv
 cell_oracle_run/*.links
+
+# ---- Virtual Python Environments ----
+.venv/
