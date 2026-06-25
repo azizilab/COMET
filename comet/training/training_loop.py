@@ -1,5 +1,5 @@
 from model.encoder import CellStateEncoder
-from model.grn import GRNDictionary, initialize_grn_dictionary_from_clusters, masked_reconstruction_loss
+from model.grn import GRNDictionary, initialize_grn_dictionary_from_clusters, masked_reconstruction_loss2
 from model.velocity import DictVelocityHead, velocity_consistency_loss, atac_direction_loss, atac_direction_loss_asymmetric, velocity_smoothness_loss, density_gradient_loss, divergence_loss
 from model.ld_vae import LinearDecoder, plot_ld_embedding
 from utils.graph import build_neighbor_index
@@ -169,6 +169,8 @@ def run_training(data, model_config, train_config):
             X=X, V_dec2=V_dec2, M=M, D=D_ATOMS, A_tfs=A_tfs, sub_g2i=sub_g2i
         )
         grn.init_from_clusters(W_init)
+
+        A_dict_init_np = grn.A_dict.detach().cpu().numpy().copy() # for analysis
     
         # Pre-train encoder to recognize clusters
         cell_encoder.init_from_cluster_labels(X, cluster_labels, n_epochs=20)
@@ -217,7 +219,7 @@ def run_training(data, model_config, train_config):
                 mix_weights = cell_encoder(rna_b, temperature=temperature)
 
                 # ── GRN + Encoder losses (both phases) ────────────────────────
-                l_mask = masked_reconstruction_loss(
+                l_mask = masked_reconstruction_loss2(
                     grn=grn, mix_weights=mix_weights,          # <-- pass pre-computed
                     rna_batch=rna_b, tf_batch=tf_b,
                     tf_indices_in_G=tf_indices_in_G.to(rna_b.device),
@@ -360,6 +362,8 @@ def run_training(data, model_config, train_config):
             np.save(f"{d}/loss_history.npy",  np.array(loss_history))
             np.save(f"{d}/z_ld_2d.npy",      z_2d_np)
             np.save(f"{d}/gene_loadings.npy", gene_loadings)
+            np.save(f"{d}/A_dict_init.npy",   A_dict_init_np) # for analysis
+            np.save(f"{d}/cluster_labels.npy", cluster_labels) # initial cluster labels used - for analysis
             gif_maker.save(f"{d}/velocity_training.gif", fps=3)
             gif_maker.save_slide_png(f"{d}/velocity_slide_final.png")
             

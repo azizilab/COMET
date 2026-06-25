@@ -118,7 +118,7 @@ def initialize_grn_dictionary_from_clusters(
     """
     # 1. Cluster in Decipher space (already a good low-dim representation)
     print(f"Clustering into {D} groups in Decipher space...")
-    km = KMeans(n_clusters=D, random_state=42, n_init=10)
+    km = KMeans(n_clusters=D, n_init=10)
     cluster_labels = km.fit_predict(V_dec2)
     
     # 2. For each cluster, find marker genes (high mean, low in others)
@@ -153,6 +153,7 @@ def initialize_grn_dictionary_from_clusters(
     return cluster_labels, W_init
 
 
+
 # ═══════════════════════════════════════════════════════════════════════════
 # STEP 7  –  Masked Reconstruction (BERT task)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -169,7 +170,7 @@ def initialize_grn_dictionary_from_clusters(
 #   true regulatory relationship between TFs and gene g — learned from the
 #   *structure* of co-variation across cells, not from a labelled target.
  
-def masked_reconstruction_loss(grn, mix_weights, rna_batch, tf_batch,
+def masked_reconstruction_loss1(grn, mix_weights, rna_batch, tf_batch,
                                 tf_indices_in_G, mask_frac=0.40):
     """
     mix_weights : (B, D) — already computed by caller, do NOT recompute encoder.
@@ -192,3 +193,55 @@ def masked_reconstruction_loss(grn, mix_weights, rna_batch, tf_batch,
     if mask.sum() == 0:
         return rna_pred.mean() * 0.0
     return F.mse_loss(rna_pred[mask], rna_batch[mask])
+
+
+
+def masked_reconstruction_loss2(
+    grn,
+    mix_weights,
+    rna_batch,
+    tf_batch,
+    tf_indices_in_G,
+    mask_frac=0.40,
+):
+    B, G = rna_batch.shape
+    device = rna_batch.device
+    T = len(tf_indices_in_G)
+
+    # --------------------------------------------------
+    # Sample mask only over TFs
+    # --------------------------------------------------
+    tf_mask = torch.rand(B, T, device=device) < mask_frac
+
+    # --------------------------------------------------
+    # Zero masked TF inputs
+    # --------------------------------------------------
+    tf_input_masked = tf_batch.clone()
+    tf_input_masked[tf_mask] = 0.0
+
+    # --------------------------------------------------
+    # Predict transcriptome
+    # --------------------------------------------------
+    rna_pred = grn.predict_rna(tf_input_masked, mix_weights)
+
+    # --------------------------------------------------
+    # Build loss mask:
+    #   - all non-TF genes included
+    #   - only masked TF genes included
+    # --------------------------------------------------
+    loss_mask = torch.ones(B, G, dtype=torch.bool, device=device)
+
+    # Remove all TF genes first
+    loss_mask[:, tf_indices_in_G] = False
+
+    # Add back only the masked TFs
+    loss_mask[:, tf_indices_in_G] = tf_mask
+
+    # Safety check
+    if loss_mask.sum() == 0:
+        return rna_pred.mean() * 0.0
+
+    return F.mse_loss(
+        rna_pred[loss_mask],
+        rna_batch[loss_mask]
+    )
