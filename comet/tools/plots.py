@@ -179,7 +179,10 @@ def plot_psi_field(V_dec2, psi_np, all_weights, D_ATOMS, origin_atom, save_path=
     for d in range(D_ATOMS):
         mask = dom_atom == d
         tag  = " ← ORIGIN" if d == origin_atom else ""
-        print(f"  Atom {d}: mean ψ = {psi_np[mask].mean():.4f}{tag}")
+        if mask.sum() == 0:
+            print(f"  Atom {d}: mean ψ = N/A (no dominant cells){tag}")
+        else:
+            print(f"  Atom {d}: mean ψ = {psi_np[mask].mean():.4f}{tag}")
 
     plt.tight_layout()
     _save(fig, save_path)
@@ -241,6 +244,11 @@ def plot_velocity_streamlines(X_2d, V_smooth, all_weights=None,
 
     speed     = np.sqrt(U ** 2 + W ** 2)
     speed_max = np.percentile(speed[active], 99) + 1e-8
+    if speed_max < 2e-8:
+        print("\nWARNING: V_smooth is effectively zero — no streamlines will appear.")
+        print("  Likely cause: psi has no gradient (e.g. all cells at psi≈1.0).")
+        print("  Inspect the checkpoint: if psi.max()-psi.min() < 0.1, run_training()")
+        print("  will automatically re-run Phase 3 to recover a valid psi field.")
     U_plot    = U / speed_max
     W_plot    = W / speed_max
 

@@ -124,12 +124,102 @@ def run_training(data, model_config, train_config):
     all_run_loss_histories = {}
     all_run_flow_histories = {}
 
+    # Track outputs from the most-recent completed run (trained or loaded).
+    psi_np_out    = None
+    A_learned_out = None
+    w_np_out      = None
+
     for run_i in range(NUM_RUNS):
-        # ── Skip if already complete ──────────────────────────────────────────
-        run_dir = os.path.join(base_path, f"run{run_i}")
+        # ── Skip if already complete — but load checkpoint data into memory ────
+        run_dir  = os.path.join(base_path, f"run{run_i}")
         psi_path = os.path.join(run_dir, "psi.npy")
+
         if os.path.exists(psi_path):
-            print(f"\n::: Run {run_i} already exists. Skipping. :::")
+            print(f"\n::: Run {run_i} — checkpoint found, loading... :::")
+            psi_ckpt = np.load(psi_path)
+            w_ckpt   = np.load(os.path.join(run_dir, "mix_weights.npy"))
+            A_ckpt   = np.load(os.path.join(run_dir, "A_learned.npy"))
+            with open(os.path.join(run_dir, "flow_field_params.json")) as _f:
+                fp_ckpt = json.load(_f)
+
+            psi_range = float(psi_ckpt.max()) - float(psi_ckpt.min())
+
+            if psi_range < 0.1:
+                # Degenerate checkpoint — psi has no gradient; re-run Phase 3
+                # from the saved mix_weights without touching Phases 1/2.
+                print(f"  WARNING: psi range = {psi_range:.6f} (degenerate). "
+                      "Re-running Phase 3 from saved mix_weights.")
+
+                mix_w_ckpt    = torch.tensor(w_ckpt, dtype=torch.float32)
+                dom_atom_ckpt = mix_w_ckpt.argmax(dim=1)
+                dom_counts    = torch.bincount(dom_atom_ckpt, minlength=D_ATOMS)
+
+                origin_atom_ckpt = int(fp_ckpt["origin_atom"])
+
+                # If the saved origin atom has zero dominant cells its P=-1
+                # contributes nothing (all mix_w[:,origin]≈0 → psi≈1). Pick
+                # the valid atom with the lowest mean mixing weight instead.
+                if dom_counts[origin_atom_ckpt].item() == 0:
+                    min_cells = max(1, int(0.05 * len(dom_atom_ckpt)))
+                    valid_atoms = [d for d in range(D_ATOMS)
+                                   if dom_counts[d].item() >= min_cells]
+                    if valid_atoms:
+                        mean_w = float('inf')
+                        for d in valid_atoms:
+                            mw = float(mix_w_ckpt[:, d].mean())
+                            if mw < mean_w:
+                                mean_w = mw
+                                origin_atom_ckpt = d
+                        print(f"  Collapsed origin atom re-selected → atom {origin_atom_ckpt} "
+                              f"(mean weight {mean_w:.4f})")
+
+                mvf_r   = MarkovProgressionField(D=D_ATOMS, origin_atom=origin_atom_ckpt)
+                opt_r   = torch.optim.Adam(mvf_r.parameters(), lr=PHASE3_LR)
+                sched_r = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    opt_r, T_max=PHASE3_EPOCHS, eta_min=ETA_MIN_P3
+                )
+
+                for step_r in range(PHASE3_EPOCHS):
+                    psi_raw_r = mvf_r.psi_raw(mix_w_ckpt)
+                    psi_r     = graph_smooth(psi_raw_r, neighbor_indices_t,
+                                            n_hops=N_PSI_SMOOTH_HOPS)
+                    l_pol_r   = psi_polarity_loss(psi_r, dom_atom_ckpt, origin_atom_ckpt)
+                    l_eps_r   = (mvf_r.eps_raw ** 2).mean()
+                    loss_r    = W3_POLARITY * l_pol_r + W3_EPS_REG * l_eps_r
+                    opt_r.zero_grad(); loss_r.backward(); opt_r.step(); sched_r.step()
+
+                    if step_r % 100 == 0 or step_r == PHASE3_EPOCHS - 1:
+                        with torch.no_grad():
+                            P_r = mvf_r.atom_progression().numpy()
+                        print(f"  [P3 re-run] Step {step_r:03d}  "
+                              f"total={loss_r.item():.4f}  pol={l_pol_r.item():.4f}  "
+                              f"P={P_r.round(3)}")
+
+                with torch.no_grad():
+                    psi_final_r = graph_smooth(
+                        mvf_r.psi_raw(mix_w_ckpt), neighbor_indices_t,
+                        n_hops=N_PSI_SMOOTH_HOPS
+                    )
+                    P_final_r = mvf_r.atom_progression().numpy()
+
+                psi_ckpt = psi_final_r.detach().numpy()
+                np.save(psi_path, psi_ckpt)
+
+                fp_ckpt["origin_atom"] = origin_atom_ckpt
+                fp_ckpt["P"]           = P_final_r.tolist()
+                with open(os.path.join(run_dir, "flow_field_params.json"), "w") as _f:
+                    json.dump(fp_ckpt, _f, indent=2)
+
+                new_range = float(psi_ckpt.max()) - float(psi_ckpt.min())
+                print(f"  Phase 3 re-run complete. New psi range: {new_range:.4f}")
+            else:
+                print(f"  psi range = {psi_range:.4f}  (valid, skipping training)")
+
+            all_run_loss_histories[f"run{run_i}"] = {}
+            all_run_flow_histories[f"run{run_i}"] = {}
+            psi_np_out    = psi_ckpt
+            A_learned_out = A_ckpt
+            w_np_out      = w_ckpt
             continue
 
         print(f"\n::: Starting Run {run_i} :::")
@@ -196,7 +286,10 @@ def run_training(data, model_config, train_config):
                 l_sparse  = grn.sparsity_loss()
                 l_diverse = grn.diversity_loss()
                 l_access  = grn.tf_access_consistency_loss()
-                l_dirich  = cell_encoder.dirichlet_sharpening_loss(mix_w)
+                # Reference formula: -sum_D(log w) per cell, then batch-mean.
+                # Equivalent to D * mean_all(-log w) — 4.4× stronger than the
+                # encoder's dirichlet_sharpening_loss (which uses 0.9 * mean).
+                l_dirich  = -torch.sum(torch.log(mix_w + 1e-8), dim=-1).mean()
 
                 H      = -torch.sum(mix_w * torch.log(mix_w + 1e-8), dim=-1).mean()
                 H_norm = H / np.log(D_ATOMS)   # normalized entropy
@@ -357,6 +450,10 @@ def run_training(data, model_config, train_config):
 
         print(f"\nRun {run_i} complete. Outputs saved to: {run_dir}")
 
+        psi_np_out    = psi_final_t.detach().numpy()
+        A_learned_out = A_learned
+        w_np_out      = w_np
+
         # ── Optional LD-VAE biplot (uses pseudotime if available) ────────────
         if pseudo_norm is not None:
             with torch.no_grad():
@@ -388,11 +485,16 @@ def run_training(data, model_config, train_config):
 
     print("Training complete.")
 
-    # Return psi and mix_weights from the last run for downstream use
+    if psi_np_out is None:
+        raise RuntimeError(
+            "run_training() completed without producing any output. "
+            "Ensure NUM_RUNS > 0 and at least one run either trained or had a checkpoint."
+        )
+
     return {
-        "psi":             psi_final_t.detach().numpy(),
-        "A_learned":       A_learned,
-        "mix_weights":     w_np,
+        "psi":             psi_np_out,
+        "A_learned":       A_learned_out,
+        "mix_weights":     w_np_out,
         "loss_histories":  all_run_loss_histories,
         "flow_histories":  all_run_flow_histories,
     }

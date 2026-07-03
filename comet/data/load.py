@@ -262,4 +262,103 @@ def build_tf_access_prior(
 
 
 def as_dense(x):
-    return x.toarray() if issparse(x) else np.asarray(x)    
+    return x.toarray() if issparse(x) else np.asarray(x)
+
+
+def load_all_comet_data(config=None):
+    """
+    Notebook-friendly entry point: run all data loading and preprocessing steps
+    in one call and return the three primary objects plus a fully assembled data
+    dict ready for run_training().
+
+    Parameters
+    ----------
+    config : dict, optional
+        Path config as produced by config.DATA.  Defaults to config.DATA when
+        omitted so notebook users do not have to import config themselves.
+
+    Returns
+    -------
+    rna_adata     : AnnData
+        scRNA-seq object (N cells × all_genes).  Carries .obs FACS columns
+        and is passed directly to assign_velten_celltypes, plot_marker_expression,
+        plot_velocity_streamlines, etc.
+    data          : dict
+        Fully assembled preprocessing dict.  Contains every key that
+        run_training() expects (X, X_TF, M, gene_activity, gene_access,
+        TF_access_prior, A_genes, A_tfs, gene_idx, tf_idx, sub_g2i,
+        decipher_outputs, rna_adata, …).  Also carries X_full and
+        gene_to_idx_full for downstream analyses.
+    decipher_data : dict-like (NpzFile)
+        The loaded decipher_embeddings.npz with keys 'z' (N×10 latent) and
+        'v' (N×2 vis-space).  Validated for missing keys before returning.
+
+    Example
+    -------
+    >>> rna_adata, data, decipher_data = load_all_comet_data()
+    >>> V_dec2           = decipher_data["v"]
+    >>> X_full           = data["X_full"]
+    >>> gene_to_idx_full = data["gene_to_idx_full"]
+    """
+    if config is None:
+        from config import DATA as config  # lazy import avoids circular issues
+
+    raw = load_datasets(config)
+
+    universe = build_universe(
+        raw["rna_adata"],
+        raw["motif_tf_names"],
+        raw["peak_gene"],
+        raw["peaks"],
+        raw["peaks_atac"],
+    )
+
+    M_bundle = build_M(
+        raw["peaks"],
+        raw["peak_gene"],
+        raw["peak_tf"],
+        universe["X_full"],
+        universe["A_genes"],
+        universe["A_tfs"],
+        universe["peak_to_idx"],
+        universe["sub_g2i"],
+        universe["gene_to_idx_full"],
+        universe["motif_tf_to_idx"],
+    )
+
+    gene_prior_bundle = build_gene_priors(
+        universe["peak_names"],
+        universe["A_genes"],
+        raw["peak_gene"],
+        universe["peak_to_idx_atac"],
+        universe["X"],
+        raw["atac_X"],
+        universe["sub_g2i"],
+    )
+
+    TF_access_prior = build_tf_access_prior(
+        gene_prior_bundle["gene_activity"],
+        M_bundle["A_tfs"],
+        universe["gene_to_idx_full"],
+        universe["sub_g2i"],
+    )
+
+    data = {
+        **raw,
+        **universe,
+        **M_bundle,
+        **gene_prior_bundle,
+        "TF_access_prior": TF_access_prior,
+    }
+
+    rna_adata = raw["rna_adata"]
+    decipher_data = raw["decipher_outputs"]
+
+    n_cells, n_genes = rna_adata.n_obs, rna_adata.n_vars
+    n_active = len(data["A_genes"])
+    n_tfs    = len(data["A_tfs"])
+    print(f"RNA: {n_cells} cells × {n_genes} genes")
+    print(f"Active universe: {n_active} genes, {n_tfs} TFs")
+    print(f"Motif mask M: {data['M'].shape}, sparsity={data['M'].mean():.2f}")
+
+    return rna_adata, data, decipher_data

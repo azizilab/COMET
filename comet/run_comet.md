@@ -124,7 +124,41 @@ TRAIN = {
 
 ## 4. Data Loading & Preprocessing
 
-Preprocessing is automatic — `train.py` calls `data/load.py` functions in sequence. No manual preprocessing step is needed beyond placing the raw files in `comet/data/`.
+### Notebook API (recommended)
+
+Use `load_all_comet_data()` to run all four preprocessing steps in one call and
+receive the three primary data objects as named return values.
+`rna_adata` is returned explicitly here and **must be defined before any downstream
+tool that accepts it** (cell annotation, velocity streamlines, pseudotime plots, etc.).
+
+```python
+import sys
+sys.path.insert(0, "/path/to/comet")   # adjust to your checkout
+
+from data.load import load_all_comet_data
+
+# All four preprocessing steps run automatically.
+# rna_adata      — AnnData (N cells × all_genes); carries .obs FACS columns
+# data           — fully assembled dict ready for run_training()
+# decipher_data  — NpzFile with keys 'z' (N×10 latent) and 'v' (N×2 vis-space)
+rna_adata, data, decipher_data = load_all_comet_data()
+
+# Pull frequently-used objects into named variables for downstream cells.
+V_dec2           = decipher_data["v"].astype("float32")  # (N, 2)
+X_full           = data["X_full"]                        # (N, all_genes)
+gene_to_idx_full = data["gene_to_idx_full"]              # {gene: col_index}
+A_genes          = data["A_genes"]                       # (G,) active gene names
+A_tfs            = data["A_tfs"]                         # (T,) TF names
+M                = data["M"]                             # (G, T) binary motif mask
+gene_idx         = data["gene_idx"]                      # (G,) positions in X_full
+```
+
+### Script API (CLI)
+
+`train.py` calls the same four functions in sequence. No manual preprocessing step
+is needed beyond placing the raw files in `comet/data/`.
+
+### Preprocessing step details
 
 **Step 1 — RNA universe (`build_universe`)**
 - Reads `velten_rna.h5ad` → `X_full` (N × all_genes)
@@ -149,7 +183,20 @@ Preprocessing is automatic — `train.py` calls `data/load.py` functions in sequ
 
 ## 5. Training
 
-### Command
+### From a notebook (recommended after Section 4 notebook setup)
+
+```python
+from training.training_loop import run_training
+from config import MODEL, TRAIN
+
+# data is the dict returned by load_all_comet_data() in Section 4.
+outputs = run_training(data, MODEL, TRAIN)
+
+# outputs keys: 'psi', 'A_learned', 'mix_weights',
+#               'loss_histories', 'flow_histories'
+```
+
+### From the command line
 
 ```bash
 cd comet/
@@ -158,9 +205,15 @@ python train.py
 
 No CLI arguments. All configuration is in `config.py`.
 
-### Resume behavior
+### Resume / checkpoint behavior
 
-Each run checks for `{OUTPUT_DIR}/run{i}/psi.npy`. If found, that run is skipped. To re-run from scratch, delete or rename the output directory.
+Each run checks for `{OUTPUT_DIR}/run{i}/psi.npy`.
+
+**If the checkpoint exists**, `run_training()` loads `psi.npy`, `mix_weights.npy`, and `A_learned.npy` from disk and skips all training for that run. The loaded values are returned in the `outputs` dict exactly as if training had just finished.
+
+**Degenerate-checkpoint recovery.** A checkpoint where `psi.max() − psi.min() < 0.1` indicates a flat field (no gradient → no velocity arrows, broken pseudotime). This can happen when the origin atom collapses to zero mixing-weight usage during Phases 1/2. `run_training()` detects this automatically and re-runs Phase 3 in-place using only the saved `mix_weights.npy` — Phases 1/2 are not re-run. If the saved `origin_atom` itself has no dominant cells, a new origin atom is selected (lowest mean weight among atoms with ≥5% of cells) before Phase 3 is re-run. The corrected `psi.npy` and `flow_field_params.json` are overwritten with the new values.
+
+**To force full retraining** from scratch, delete or rename the run directory (e.g. `rm -rf bert_grn_out_615/run0/`) before calling `run_training()`.
 
 ### Training pipeline (per run)
 
@@ -281,7 +334,16 @@ from tools import (
 
 ### 9.1 Cell type annotation
 
+`rna_adata`, `V_dec2`, `X_full`, and `gene_to_idx_full` are all returned by
+`load_all_comet_data()` (Section 4) and must be defined before this call.
+
 ```python
+# These four variables come from Section 4:
+#   rna_adata, data, decipher_data = load_all_comet_data()
+#   V_dec2           = decipher_data["v"]
+#   X_full           = data["X_full"]
+#   gene_to_idx_full = data["gene_to_idx_full"]
+
 cell_types = assign_velten_celltypes(
     rna_adata        = rna_adata,
     V_dec2           = V_dec2,
@@ -352,6 +414,7 @@ plot_psi_field(
 ### 9.5 Velocity streamlines
 
 ```python
+# rna_adata from load_all_comet_data(); cell_types from assign_velten_celltypes()
 plot_velocity_streamlines(
     X_2d            = V_dec2,
     V_smooth        = V_smooth,
@@ -369,6 +432,7 @@ Uses `integration_direction='forward'` to prevent backward-loop artifact.
 ### 9.6 Pseudotime
 
 ```python
+# rna_adata from load_all_comet_data(); pseudotime from infer_velocity_pseudotime()
 plot_pseudotime(
     V_dec2          = V_dec2,
     pseudotime      = pseudotime,
@@ -385,6 +449,7 @@ If `facs_pseudotime` is provided, prints Spearman ρ as a validation metric.
 ### 9.7 Marker expression
 
 ```python
+# rna_adata from load_all_comet_data()
 plot_marker_expression(
     rna_adata = rna_adata,
     V_dec2    = V_dec2,
@@ -410,8 +475,10 @@ entropy = analyze_transition_zones(
 ### 9.9 Trajectory gene analysis
 
 ```python
-A_genes = np.load(f"{OUTPUT_DIR}/run0/A_genes.npy", allow_pickle=True)
+# A_genes and gene_idx can be loaded from disk or taken from data["A_genes"] / data["gene_idx"]
+A_genes  = np.load(f"{OUTPUT_DIR}/run0/A_genes.npy", allow_pickle=True)
 gene_idx = np.load(f"{OUTPUT_DIR}/run0/gene_idx.npy")
+# X_full from load_all_comet_data() (data["X_full"]); subset to active genes
 X_active = X_full[:, gene_idx]   # (N, G)
 
 results = analyze_trajectory_genes(
