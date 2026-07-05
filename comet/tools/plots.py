@@ -67,28 +67,6 @@ def plot_loss_curves(loss_history, run_name="Run 0", save_path=None):
     plt.show()
 
 
-def plot_phase3_loss(flow_history, run_name="Run 0", save_path=None):
-    """
-    Phase 3 (Markov progression field) loss curves: total, polarity, fine_order.
-
-    flow_history : dict with keys "step", "total", "polarity", "fine_order"
-    """
-    fig, ax = plt.subplots(figsize=(6, 4), dpi=120)
-    steps = flow_history["step"]
-    ax.plot(steps, flow_history["total"],      color='black',      linewidth=2, label='total')
-    ax.plot(steps, flow_history["polarity"],   color='firebrick',  linewidth=2, label='polarity')
-    ax.plot(steps, flow_history["fine_order"], color='darkorange', linewidth=2, label='fine_order')
-    ax.set_title(f"{run_name} — Phase 3 (Markov Progression Field)", fontweight='bold')
-    ax.set_xlabel("Full-batch step")
-    ax.set_ylabel("Loss")
-    ax.legend(frameon=False, fontsize=8)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    plt.tight_layout()
-    _save(fig, save_path)
-    plt.show()
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Model state inspection
 # ─────────────────────────────────────────────────────────────────────────────
@@ -135,55 +113,6 @@ def plot_atom_weights(V_dec2, all_weights, D_ATOMS, origin_atom,
 
     plt.suptitle("Per-cell GRN mixing weights\n(each atom should cover a distinct region)",
                  fontsize=11)
-    plt.tight_layout()
-    _save(fig, save_path)
-    plt.show()
-
-
-def plot_psi_field(V_dec2, psi_np, all_weights, D_ATOMS, origin_atom, save_path=None):
-    """
-    Dual-panel ψ field:
-      Left:  scalar progression field (plasma colormap)
-      Right: dominant-atom territory map with origin labelled
-
-    Also prints mean ψ per dominant-atom group as a sanity check.
-    """
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5), dpi=130)
-
-    sc0 = axes[0].scatter(V_dec2[:, 0], V_dec2[:, 1], c=psi_np,
-                          cmap='plasma', s=10, alpha=0.8, rasterized=True)
-    plt.colorbar(sc0, ax=axes[0], fraction=0.04, label='ψ (progression score)')
-    axes[0].set_title('Scalar Progression Field ψ\n(low = origin/stem, high = committed)',
-                      fontweight='bold')
-    axes[0].set_xlabel('Decipher 1', fontweight='bold')
-    axes[0].set_ylabel('Decipher 2', fontweight='bold')
-    axes[0].spines['top'].set_visible(False)
-    axes[0].spines['right'].set_visible(False)
-
-    dom_atom = all_weights.argmax(axis=1)
-    palette  = plt.cm.tab10(np.linspace(0, 1, D_ATOMS))
-    for d in range(D_ATOMS):
-        mask  = dom_atom == d
-        label = f"Atom {d} (ORIGIN)" if d == origin_atom else f"Atom {d}"
-        axes[1].scatter(V_dec2[mask, 0], V_dec2[mask, 1],
-                        c=[palette[d]], s=8, alpha=0.7, label=label,
-                        edgecolors='none', rasterized=True)
-    axes[1].set_title('Dominant GRN Atom\n(colours = atom territories)', fontweight='bold')
-    axes[1].set_xlabel('Decipher 1', fontweight='bold')
-    axes[1].set_ylabel('Decipher 2', fontweight='bold')
-    axes[1].legend(bbox_to_anchor=(1.02, 1), loc='upper left', frameon=False, fontsize=8)
-    axes[1].spines['top'].set_visible(False)
-    axes[1].spines['right'].set_visible(False)
-
-    print("\nMean ψ per dominant-atom group (origin atom should be lowest):")
-    for d in range(D_ATOMS):
-        mask = dom_atom == d
-        tag  = " ← ORIGIN" if d == origin_atom else ""
-        if mask.sum() == 0:
-            print(f"  Atom {d}: mean ψ = N/A (no dominant cells){tag}")
-        else:
-            print(f"  Atom {d}: mean ψ = {psi_np[mask].mean():.4f}{tag}")
-
     plt.tight_layout()
     _save(fig, save_path)
     plt.show()
@@ -246,9 +175,8 @@ def plot_velocity_streamlines(X_2d, V_smooth, all_weights=None,
     speed_max = np.percentile(speed[active], 99) + 1e-8
     if speed_max < 2e-8:
         print("\nWARNING: V_smooth is effectively zero — no streamlines will appear.")
-        print("  Likely cause: psi has no gradient (e.g. all cells at psi≈1.0).")
-        print("  Inspect the checkpoint: if psi.max()-psi.min() < 0.1, run_training()")
-        print("  will automatically re-run Phase 3 to recover a valid psi field.")
+        print("  Likely cause: the velocity head has not learned a meaningful field yet.")
+        print("  Check V_pred.npy — if all rows are near zero, inspect Phase 2 training.")
     U_plot    = U / speed_max
     W_plot    = W / speed_max
 
@@ -313,7 +241,7 @@ def plot_velocity_streamlines(X_2d, V_smooth, all_weights=None,
 # Pseudotime
 # ─────────────────────────────────────────────────────────────────────────────
 
-def plot_pseudotime(V_dec2, pseudotime, cell_types, psi_arr,
+def plot_pseudotime(V_dec2, pseudotime, cell_types,
                     root_pct=0.05, facs_pseudotime=None, save_path=None):
     """
     Two-panel pseudotime plot.
@@ -322,12 +250,12 @@ def plot_pseudotime(V_dec2, pseudotime, cell_types, psi_arr,
 
     Prints Spearman ρ vs facs_pseudotime when provided.
 
-    root_pct: fraction of lowest-ψ cells used as roots — must match what was
-              passed to infer_velocity_pseudotime to reproduce the same root set.
+    root_pct: fraction of lowest-pseudotime cells highlighted as roots — should
+              match the root_pct passed to compute_comet_pseudotime.
     """
-    psi_thresh = np.percentile(psi_arr, root_pct * 100)
-    root_idx   = np.where(psi_arr <= psi_thresh)[0]
-    n_roots    = root_idx.size
+    pt_thresh = np.percentile(pseudotime, root_pct * 100)
+    root_idx  = np.where(pseudotime <= pt_thresh)[0]
+    n_roots   = root_idx.size
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5), dpi=130)
 
@@ -335,9 +263,9 @@ def plot_pseudotime(V_dec2, pseudotime, cell_types, psi_arr,
                             s=12, alpha=0.8, edgecolors='none', rasterized=True)
     axes[0].scatter(V_dec2[root_idx, 0], V_dec2[root_idx, 1],
                     c='red', s=60, zorder=5, marker='*',
-                    label=f'Root cells (n={n_roots}, lowest {root_pct*100:.0f}% ψ)')
+                    label=f'Root cells (n={n_roots}, lowest {root_pct*100:.0f}% pseudotime)')
     plt.colorbar(sc_pt, ax=axes[0], fraction=0.04, label='Velocity pseudotime (0=earliest)')
-    axes[0].set_title('Inferred Velocity Pseudotime\n(Dijkstra on ψ-gradient graph)',
+    axes[0].set_title('COMET Velocity Pseudotime\n(Dijkstra on velocity-aligned graph)',
                       fontweight='bold')
     axes[0].set_xlabel('Decipher 1', fontweight='bold')
     axes[0].set_ylabel('Decipher 2', fontweight='bold')

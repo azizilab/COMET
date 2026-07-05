@@ -7,10 +7,13 @@ Covers:
 """
 
 import os
+import heapq
 
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import spearmanr
+from scipy.sparse import csr_matrix
+from sklearn.neighbors import NearestNeighbors
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -34,6 +37,156 @@ _GT_MARKERS = {
     'HSC': {'up': {'CD34', 'THY1', 'HOXA9', 'MEIS1', 'GATA2', 'HLF'},  'down': set()},
     'MPP': {'up': {'CD34', 'FLT3', 'GATA2', 'MPL'},                      'down': set()},
 }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMET pseudotime (post-training, velocity-field-based)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_comet_pseudotime(
+    V_pred: np.ndarray,
+    X: np.ndarray,
+    V_dec2: np.ndarray,
+    mix_weights: np.ndarray,
+    root_pct: float = 0.05,
+    k_neighbors: int = 30,
+    cell_types: np.ndarray = None,
+) -> np.ndarray:
+    """
+    Post-training pseudotime from the learned velocity field.
+
+    This is a purely downstream analysis function — it uses only saved model
+    outputs (V_pred, X, V_dec2, mix_weights) and requires no trained psi field.
+
+    Algorithm
+    ---------
+    1. Project gene-space velocity V_pred (N, G) to Decipher 2D space V_2d (N, 2)
+       using the same cosine-weighted kNN projection as the training GIF maker.
+
+    2. Build a directed Markov transition matrix T (N×N sparse) in 2D:
+       For each cell i and its k 2D nearest neighbors j:
+         w_ij = ReLU( dot(V_2d[i], x_j - x_i) / (||V_2d[i]|| * ||x_j - x_i|| + eps) )
+       Row-normalize so each row sums to 1 (cells at velocity sinks get uniform rows).
+
+    3. Root detection (label-free):
+       Cells whose dominant GRN atom has the highest mean mixing weight across the
+       population are the origin/stem cells. Specifically:
+         - Find origin_atom = argmin of mean(mix_weights, axis=0)  [least-used atom
+           is the most progenitor-like in the Decipher clustering initialization]
+         - Roots = cells where mix_weights[:, origin_atom] is in the top root_pct fraction.
+       This gives the same root identification as the Decipher cluster initialization
+       without requiring any psi signal.
+
+    4. Pseudotime via multi-source Dijkstra on the directed 2D graph:
+       Edge i→j exists iff w_ij > 0 (positive cosine with velocity direction).
+       Cost of edge i→j = 1 / (w_ij + eps)  [low-cost = strongly aligned with velocity].
+       Multi-source Dijkstra from all root cells. dist[cell] = pseudotime.
+       Unreachable cells get dist = 1.05 * max(finite dist).
+
+    5. Clip at 99th percentile, normalize to [0, 1].
+
+    Parameters
+    ----------
+    V_pred      : (N, G) gene-space velocity from vel_head, saved as V_pred.npy
+    X           : (N, G) normalized expression (same gene subset as V_pred)
+    V_dec2      : (N, 2) Decipher 2-D visualization coordinates
+    mix_weights : (N, D) encoder mixing weights, saved as mix_weights.npy
+    root_pct    : fraction of cells used as roots (default 0.05)
+    k_neighbors : kNN for 2D transition graph (default 30)
+    cell_types  : (N,) optional, printed for diagnostics only
+
+    Returns
+    -------
+    pt : (N,) float32, pseudotime in [0, 1]
+    """
+    from model.velocity import project_to_2d
+
+    N = V_dec2.shape[0]
+
+    # ── Step 1: project gene-space velocity to 2D ─────────────────────────────
+    print("[pseudotime] Projecting velocity to 2D Decipher space...")
+    V_2d = project_to_2d(V_pred, V_dec2, X, k=k_neighbors, scale=12.0)
+    # V_2d: (N, 2)
+
+    # ── Step 2: build directed Markov matrix in 2D ────────────────────────────
+    print("[pseudotime] Building 2D Markov transition matrix...")
+    nbrs = NearestNeighbors(n_neighbors=k_neighbors + 1).fit(V_dec2)
+    _, idx = nbrs.kneighbors(V_dec2)
+    idx = idx[:, 1:]  # exclude self — shape (N, k)
+
+    rows, cols, vals = [], [], []
+    for i in range(N):
+        v_i   = V_2d[i]                              # (2,)
+        v_norm = np.linalg.norm(v_i) + 1e-8
+        for j in idx[i]:
+            disp      = V_dec2[j] - V_dec2[i]        # (2,)
+            disp_norm = np.linalg.norm(disp) + 1e-8
+            w_ij      = max(0.0, float(np.dot(v_i, disp) / (v_norm * disp_norm)))
+            if w_ij > 0:
+                rows.append(i); cols.append(int(j)); vals.append(w_ij)
+
+    T_raw = csr_matrix((vals, (rows, cols)), shape=(N, N), dtype=np.float32)
+    # Row-normalize
+    row_sums = np.asarray(T_raw.sum(axis=1)).ravel()
+    row_sums[row_sums == 0] = 1.0
+    T = csr_matrix(T_raw.multiply(1.0 / row_sums[:, np.newaxis]))
+
+    # ── Step 3: root detection via GRN mixing weights ─────────────────────────
+    # The origin atom is the one with the smallest mean weight (most progenitor-like).
+    # This mirrors the Decipher cluster initialization: the cluster that is "least
+    # committed" to any one lineage will have the smallest mean mix_weight.
+    mean_w     = mix_weights.mean(axis=0)       # (D,)
+    origin_atom = int(np.argmin(mean_w))
+    print(f"[pseudotime] Origin atom (argmin mean weight): {origin_atom}")
+
+    # Root cells: those with the highest mix_weight for the origin atom
+    w_origin   = mix_weights[:, origin_atom]    # (N,)
+    thresh     = np.percentile(w_origin, (1.0 - root_pct) * 100)
+    root_mask  = w_origin >= thresh
+    root_idx   = np.where(root_mask)[0]
+    print(f"[pseudotime] Root cells: n={len(root_idx)} "
+          f"(top {root_pct*100:.1f}% of atom-{origin_atom} weight)")
+    if cell_types is not None and len(cell_types) == N:
+        print(f"  Root cell types: {np.unique(cell_types[root_idx])}")
+
+    # ── Step 4: multi-source Dijkstra on directed 2D velocity graph ───────────
+    # Edge cost = 1 / w_ij  (strongly aligned edges are cheap → visited first).
+    # Build adjacency list from T (only directed, positively-weighted edges).
+    print("[pseudotime] Running Dijkstra...")
+    graph = [[] for _ in range(N)]
+    cx = T.tocoo()
+    for i, j, w in zip(cx.row, cx.col, cx.data):
+        if w > 0:
+            graph[i].append((1.0 / (float(w) + 1e-8), int(j)))
+
+    INF  = float('inf')
+    dist = np.full(N, INF, dtype=np.float64)
+    dist[root_idx] = 0.0
+    heap = [(0.0, int(r)) for r in root_idx]
+    heapq.heapify(heap)
+
+    while heap:
+        d_u, u = heapq.heappop(heap)
+        if d_u > dist[u]:
+            continue
+        for cost_uv, v in graph[u]:
+            d_v = dist[u] + cost_uv
+            if d_v < dist[v]:
+                dist[v] = d_v
+                heapq.heappush(heap, (d_v, v))
+
+    # ── Step 5: fill unreachable, clip, normalize ─────────────────────────────
+    finite_mask = dist < INF
+    if not finite_mask.all():
+        n_disc = int((~finite_mask).sum())
+        print(f"  Warning: {n_disc} cells unreachable — assigning max pseudotime.")
+        dist[~finite_mask] = dist[finite_mask].max() * 1.05
+
+    pt = np.clip(dist, 0, np.percentile(dist, 99))
+    pt = (pt - pt.min()) / (pt.max() - pt.min() + 1e-8)
+
+    print(f"[pseudotime] Done. Range: [{pt.min():.4f}, {pt.max():.4f}]")
+    return pt.astype(np.float32)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -134,7 +287,7 @@ def analyze_trajectory_genes(X, V_dec2, cell_types, A_genes, vel_pseudotime,
     V_dec2         : (N, 2) Decipher 2-D coordinates
     cell_types     : (N,) string labels
     A_genes        : (G,) gene names aligned to X columns
-    vel_pseudotime : (N,) inferred pseudotime (from infer_velocity_pseudotime)
+    vel_pseudotime : (N,) inferred pseudotime (from compute_comet_pseudotime)
     n_top          : number of top increasing genes to return
     save_path      : base path for saving; each lineage appended as _<lineage>.png
 

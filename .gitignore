@@ -42,3 +42,6 @@ cell_oracle_run/*.links
 
 # ---- Virtual Python Environments ----
 .venv/
+
+decipher_run/_decipher_models/
+decipher_run/decipher_outputs3/
