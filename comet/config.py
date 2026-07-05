@@ -31,7 +31,7 @@ CONFIG = {
     "VEL_HIDDEN":     256,
 
     # ── Training ──────────────────────────────────────────────────────────────
-    "NUM_RUNS":       5,
+    "NUM_RUNS":       1,
     "N_EPOCHS":       120,
     "PHASE1_EPOCHS":  40,
     "BATCH_SIZE":     512,
