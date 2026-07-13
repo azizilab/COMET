@@ -32,11 +32,14 @@ def _save(fig_or_path, save_path):
 
 def plot_loss_curves(loss_history, run_name="Run 0", save_path=None):
     """
-    3-panel Phase 1/2 training loss with phase shading.
+    Up to 3-panel Phase 1/2 training loss with phase shading.
 
-    loss_history : dict with keys "epoch", "total", "mask", "diversity", "phase"
+    loss_history : dict that always has "epoch" and "phase", plus whichever
+    loss terms the training loop happened to log (e.g. "total", and
+    optionally per-term entries under names like "mask"/"l_mask" or
+    "diversity"/"l_div"/"l_diverse"). Panels for terms that aren't present
+    are skipped rather than raising a KeyError.
     """
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4), dpi=120)
     epochs = loss_history["epoch"]
     phases = np.array(loss_history["phase"])
 
@@ -47,11 +50,28 @@ def plot_loss_curves(loss_history, run_name="Run 0", save_path=None):
         ax.axvspan(p1_end, max(epochs), alpha=0.05, color='orange', label='Phase 2')
         ax.axvline(p1_end, color='gray', linestyle='--', linewidth=1)
 
-    for ax, key, color, title in [
-        (axes[0], "total",     "black",     f"{run_name} — Total Loss"),
-        (axes[1], "mask",      "steelblue", "Masked Reconstruction Loss"),
-        (axes[2], "diversity", "green",     "Atom Diversity Loss"),
-    ]:
+    # Each panel lists the candidate keys the training loop might have used;
+    # the first one found in loss_history is plotted.
+    panel_specs = [
+        (["total"],                              "black",     f"{run_name} — Total Loss"),
+        (["mask", "l_mask"],                      "steelblue", "Masked Reconstruction Loss"),
+        (["diversity", "l_div", "l_diverse"],     "green",     "Atom Diversity Loss"),
+    ]
+    panels = []
+    for candidates, color, title in panel_specs:
+        key = next((k for k in candidates if k in loss_history), None)
+        if key is not None:
+            panels.append((key, color, title))
+
+    if not panels:
+        print("plot_loss_curves: none of the expected loss keys were found in "
+              f"loss_history (available keys: {list(loss_history.keys())})")
+        return
+
+    fig, axes = plt.subplots(1, len(panels), figsize=(5 * len(panels), 4), dpi=120)
+    axes = np.atleast_1d(axes)
+
+    for ax, (key, color, title) in zip(axes, panels):
         ax.plot(epochs, loss_history[key], color=color, linewidth=2)
         _shade(ax)
         ax.set_title(title, fontweight='bold')
