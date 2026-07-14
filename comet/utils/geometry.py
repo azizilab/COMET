@@ -6,57 +6,52 @@ from sklearn.preprocessing import normalize as sk_normalize
 import pyranges as pr
 
 
-def project_to_2d(V_pred_full, X_2d_vis, X_full,
-                  k=30, scale=10.0, adaptive_scale=True, density_k=15):
+def project_to_2d(V_pred_full, X_2d_vis, X_full, search_space=None, k=30, scale=1.0,
+                   drift_correct=True, density_k=15, adaptive_scale=True):
     """
-    Vectorised version — no Python loop over cells.
-    Same algorithm, ~50x faster for N~1000.
+    search_space: array used to find each cell's k nearest neighbors for the
+    transition-probability kernel (default: X_2d_vis, but pass Z_dec or a PCA of
+    X_full instead — strongly preferred). d_low (the plotted displacement vectors)
+    always comes from X_2d_vis regardless of what search_space is.
     """
+    if search_space is None:
+        search_space = X_2d_vis
     N = V_pred_full.shape[0]
+    nbrs = NearestNeighbors(n_neighbors=k).fit(search_space)
+    _, idx = nbrs.kneighbors(search_space)                    # (N, k)
 
-    nbrs = NearestNeighbors(n_neighbors=k).fit(X_2d_vis)
-    _, idx = nbrs.kneighbors(X_2d_vis)   # (N, k)
+    d_high = X_full[idx] - X_full[:, None, :]                 # (N, k, G)
+    d_low  = X_2d_vis[idx] - X_2d_vis[:, None, :]             # (N, k, 2)
+
+    v_norm = np.linalg.norm(V_pred_full, axis=1, keepdims=True) + 1e-8
+    d_norm = np.linalg.norm(d_high, axis=2) + 1e-8
+    sims   = np.einsum('ng,nkg->nk', V_pred_full, d_high) / (d_norm * v_norm)
+    sims   = sims - sims.mean(axis=1, keepdims=True)
 
     if adaptive_scale:
-        nbrs_d = NearestNeighbors(n_neighbors=density_k).fit(X_2d_vis)
-        dist_d, _ = nbrs_d.kneighbors(X_2d_vis)
-        mean_nn_dist = dist_d[:, 1:].mean(axis=1)
-        density_factor = 1.0 / (mean_nn_dist + 1e-8)
-        lo, hi = density_factor.min(), density_factor.max()
-        density_factor = 1.0 + 2.0 * (density_factor - lo) / (hi - lo + 1e-8)
+        dk = NearestNeighbors(n_neighbors=density_k).fit(X_2d_vis)
+        dd, _ = dk.kneighbors(X_2d_vis)
+        dens = 1.0 / (dd[:, 1:].mean(1) + 1e-8)
+        lo, hi = dens.min(), dens.max()
+        dens = 1.0 + 2.0 * (dens - lo) / (hi - lo + 1e-8)
     else:
-        density_factor = np.ones(N, dtype=np.float32)
+        dens = np.ones(N, dtype=np.float32)
 
-    # Gene-space displacements: (C, k, G)
-    d_high = X_full[idx] - X_full[:, np.newaxis, :]        # (C, k, G)
+    w = np.exp(sims * (scale * dens)[:, None])
+    w = w / (w.sum(1, keepdims=True) + 1e-8)                  # (N, k) transition probs
 
-    # 2D displacements: (C, k, 2)
-    d_low  = X_2d_vis[idx] - X_2d_vis[:, np.newaxis, :]   # (C, k, 2)
+    d_low_unit = d_low / (np.linalg.norm(d_low, axis=2, keepdims=True) + 1e-8)
+    if drift_correct:
+        w = w - 1.0 / k                                       # remove uniform/density drift
+    V_emb2 = np.einsum('nk,nkd->nd', w, d_low_unit).astype(np.float32)
 
-    # Cosine similarity — vectorised dot product
-    # v: (C, G), d_high: (C, k, G)
-    v_norm = np.linalg.norm(V_pred_full, axis=1, keepdims=True) + 1e-8   # (C, 1)
-    d_norm = np.linalg.norm(d_high, axis=2) + 1e-8                        # (C, k)
-
-    # dot(d_high[i,j], v[i]) = einsum over G
-    dots = np.einsum('ng,nkg->nk', V_pred_full, d_high)   # (C, k)
-    sims = dots / (d_norm * v_norm)                         # (C, k)
-
-    # Center per cell
-    sims_centered = sims - sims.mean(axis=1, keepdims=True)   # (C, k)
-
-    # Adaptive softmax
-    eff_scale = (scale * density_factor)[:, np.newaxis]        # (C, 1)
-    weights = np.exp(sims_centered * eff_scale)                # (C, k)
-    weights /= weights.sum(axis=1, keepdims=True) + 1e-8       # (C, k)
-
-    # Zero out cells with near-zero velocity
-    zero_vel = np.linalg.norm(V_pred_full, axis=1) < 1e-8     # (C,)
-    weights[zero_vel] = 0.0
-
-    # Weighted sum of 2D displacements: (C, k) x (C, k, 2) -> (C, 2)
-    V_emb2 = np.einsum('nk,nkd->nd', weights, d_low).astype(np.float32)
-
+    # scale each arrow by its high-dim speed so committed regions move faster —
+    # this is a scaling of the plotted arrow, not a mask; low-speed hub cells still
+    # get drawn, just shorter, which is correct (they really are less committed).
+    speed = np.linalg.norm(V_pred_full, axis=1)
+    speed = speed / (np.percentile(speed, 95) + 1e-8)
+    V_emb2 *= speed[:, None]
+    V_emb2[np.linalg.norm(V_pred_full, axis=1) < 1e-8] = 0.0
     return V_emb2
 
 
@@ -188,3 +183,8 @@ def geometric_soft_targets(Z, arch_idx, tau_scale=0.5):
     q = np.exp(-d2 / tau)
     q = q / (q.sum(1, keepdims=True) + 1e-8)
     return q.astype(np.float32)
+
+def zscore_cols(A, eps=1e-8):
+    """Per-gene (per-column) z-score across cells."""
+    A = np.asarray(A, dtype=np.float32)
+    return (A - A.mean(axis=0, keepdims=True)) / (A.std(axis=0, keepdims=True) + eps)

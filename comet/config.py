@@ -65,7 +65,6 @@ TRAIN = {
         "SPARSE": 5e-3,
         "ACCESS": 0.1,
         "DIVERSE": 5.0,
-        "DENSE": 0.05,
         "DIV": 0.5,
         "ANCHOR": 0.5,
         "LD": 0.3,

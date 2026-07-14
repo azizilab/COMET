@@ -163,8 +163,6 @@ class GRNDictionary(nn.Module):
         return (torch.abs(self.A_dict) * closed.unsqueeze(0).unsqueeze(0)).mean()
 
 
-
-
 def init_atoms_from_soft_targets(X, q, M, A_tfs):
     """Soft-LFC init: each atom's weights come from cells weighted toward its archetype."""
     D = q.shape[1]
