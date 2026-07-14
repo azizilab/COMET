@@ -1,9 +1,26 @@
-BASE = "/home/elicanter/datasets/hematopoiesis/"
+#BASE = "/home/elicanter/datasets/hematopoiesis/"
+
+BASE = "/home/elicanter/datasets/paul2015data/"
+
+
+# DATA = {
+#     "rna": f"{BASE}/velten_rna.h5ad",
+#     "atac": f"{BASE}/GSE129785_scATAC-Hematopoiesis-CD34.mtx.gz", 
+#     "atac_peaks": f"{BASE}/GSE129785_scATAC-Hematopoiesis-CD34.peaks.txt.gz", 
+#     "peak_tf": f"{BASE}/peak_tf.mtx",
+#     "tf_names": f"{BASE}/tf_names.txt",
+#     "peak_gene": f"{BASE}/peak_gene.csv",
+#     "peaks": f"{BASE}/peaks.txt",
+#     "decipher_outputs": f"{BASE}/decipher_embeddings.npz",
+# }
+
 
 DATA = {
-    "rna": f"{BASE}/velten_rna.h5ad",
-    "atac": f"{BASE}/GSE129785_scATAC-Hematopoiesis-CD34.mtx.gz",
-    "atac_peaks": f"{BASE}/GSE129785_scATAC-Hematopoiesis-CD34.peaks.txt.gz",
+    "rna": f"{BASE}/Paul_etal_15_2.h5ad",
+    "rna_layer": "raw_count_int",  # .X here is log1p+scaled (mean~0, 78% negative) --
+                                    # use raw counts instead, matching the Velten run
+    "atac": f"{BASE}/atac_matrix.trimmed.mtx.gz",
+    "atac_peaks": f"{BASE}/atac_matrix.trimmed.peaks.txt",
     "peak_tf": f"{BASE}/peak_tf.mtx",
     "tf_names": f"{BASE}/tf_names.txt",
     "peak_gene": f"{BASE}/peak_gene.csv",
@@ -62,6 +79,6 @@ TRAIN = {
         "ETA_MIN": 1e-5
     },
 
-    "OUTPUT_DIR": "bert_grn_out_61",
+    "OUTPUT_DIR": "/home/elicanter/paul2015_outputs_test",
 
 }

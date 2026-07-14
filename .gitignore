@@ -41,4 +41,7 @@ cell_oracle_run/*.csv
 cell_oracle_run/*.links
 
 # ---- Virtual Python Environments ----
-.venv/
+.venv
+
+# ---- VS Code ----
+.vscode

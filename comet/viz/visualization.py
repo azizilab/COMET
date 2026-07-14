@@ -35,8 +35,8 @@ class VelocityGIFMaker:
         density = 2
         grid_n  = int(60 * density)
  
-        x_min, x_max = X_2d[:, 0].min(), X_2d[:, 0].max()
-        y_min, y_max = X_2d[:, 1].min(), X_2d[:, 1].max()
+        x_min, x_max = float(X_2d[:, 0].min()), float(X_2d[:, 0].max())
+        y_min, y_max = float(X_2d[:, 1].min()), float(X_2d[:, 1].max())
  
         x_grid = np.linspace(x_min, x_max, grid_n)
         y_grid = np.linspace(y_min, y_max, grid_n)

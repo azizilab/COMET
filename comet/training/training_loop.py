@@ -1,5 +1,5 @@
 from model.encoder import CellStateEncoder
-from model.grn import GRNDictionary, initialize_grn_dictionary_from_clusters, masked_reconstruction_loss2
+from model.grn import GRNDictionary, initialize_grn_dictionary_from_clusters, masked_reconstruction_loss1
 from model.velocity import DictVelocityHead, velocity_consistency_loss, atac_direction_loss, atac_direction_loss_asymmetric, velocity_smoothness_loss, density_gradient_loss, divergence_loss
 from model.ld_vae import LinearDecoder, plot_ld_embedding
 from utils.graph import build_neighbor_index
@@ -84,8 +84,10 @@ def run_training(data, model_config, train_config):
     X_TF_t     = torch.tensor(X_TF, dtype=torch.float32)
     cell_idx_t = torch.arange(X_t.size(0))
 
-    pseudo = rna_adata.obs["facs_pseudotime"].astype(np.float32)
-    pseudo_norm = (pseudo.values - pseudo.min()) / (np.ptp(pseudo.values) + 1e-8)
+    #pseudo = rna_adata.obs["facs_pseudotime"].astype(np.float32)
+    #pseudo = rna_adata.obs["dpt_pseudotime"].astype(np.float32)
+    pseudo_norm = np.zeros(X_t.size(0), dtype=np.float32)
+    #pseudo_norm = (pseudo.values - pseudo.min()) / (np.ptp(pseudo.values) + 1e-8)
     pseudo_norm_t = torch.tensor(pseudo_norm, dtype=torch.float32)
     
     dataset = TensorDataset(X_t, X_TF_t, cell_idx_t)
@@ -219,7 +221,7 @@ def run_training(data, model_config, train_config):
                 mix_weights = cell_encoder(rna_b, temperature=temperature)
 
                 # ── GRN + Encoder losses (both phases) ────────────────────────
-                l_mask = masked_reconstruction_loss2(
+                l_mask = masked_reconstruction_loss1(
                     grn=grn, mix_weights=mix_weights,          # <-- pass pre-computed
                     rna_batch=rna_b, tf_batch=tf_b,
                     tf_indices_in_G=tf_indices_in_G.to(rna_b.device),
@@ -406,6 +408,7 @@ def run_training(data, model_config, train_config):
             highlight_genes = ['CD34', 'MPO', 'LYZ', 'GATA1', 'SPI1', 'CEBPA'],
             save_path   = f"{d}/ld_embedding_biplot.png"
         )
+        
         
         print(f"RNA z_2d std per dim: {z_rna.std(axis=0).round(3)}")
         print(f"ATAC z_2d std per dim: {z_atac.std(axis=0).round(3)}")

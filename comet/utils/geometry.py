@@ -3,6 +3,7 @@ import numpy as np
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize as sk_normalize
+import pyranges as pr
 
 
 def project_to_2d(V_pred_full, X_2d_vis, X_full,
@@ -122,7 +123,57 @@ def build_local_atac(
     hi = local_gene_access.max(axis=0, keepdims=True)
     local_gene_access = (local_gene_access - lo) / (hi - lo + 1e-8)
  
+    print(local_gene_access.max())
+    print(cluster_access.max())
+    print(gene_activity.max())
+    print(np.mean(gene_activity > 0))
+
     print(f"Local ATAC: {n_clusters} clusters, k={k_atac} ATAC cells each")
     print(f"  Mean per-cluster nonzero fraction: "
           f"{np.mean(local_gene_access > 0.05):.1%}")
     return local_gene_access, cluster_labels
+
+
+
+def build_peak_overlap_map(peak_gene_peaks, atac_peak_names, min_overlap_frac=0.5):
+    """
+    peak_gene_peaks: list/array of strings like 'chr1-237511-238011' (peak_gene format)
+    atac_peak_names: list/array of strings like 'chr1:3002478-3002968' (peak_to_idx_atac format)
+    min_overlap_frac: minimum fraction of the SMALLER peak's length that must be covered
+                      by the overlap for it to count as a match.
+
+    Returns: DataFrame with columns [pg_idx, atac_idx] — every valid overlapping pair,
+             indices referring to positions in the input lists.
+    """
+    def parse(peaks):
+        chroms, starts, ends = [], [], []
+        for p in peaks:
+            chrom, s, e = p.replace(":", "-").split("-")
+            chroms.append(chrom); starts.append(int(s)); ends.append(int(e))
+        return chroms, starts, ends
+
+    c1, s1, e1 = parse(peak_gene_peaks)
+    pg_gr = pr.PyRanges(chromosomes=c1, starts=s1, ends=e1)
+    pg_gr.pg_idx = np.arange(len(peak_gene_peaks))
+    pg_len = np.array(e1) - np.array(s1)
+
+    c2, s2, e2 = parse(atac_peak_names)
+    atac_gr = pr.PyRanges(chromosomes=c2, starts=s2, ends=e2)
+    atac_gr.atac_idx = np.arange(len(atac_peak_names))
+    atac_len = np.array(e2) - np.array(s2)
+
+    joined = pg_gr.join(atac_gr)
+    df = joined.df
+    if df.empty:
+        return df.assign(pg_idx=[], atac_idx=[])
+
+    # overlap length = min(end1,end2) - max(start1,start2)
+    overlap_start = np.maximum(df["Start"], df["Start_b"])
+    overlap_end   = np.minimum(df["End"], df["End_b"])
+    overlap_len   = (overlap_end - overlap_start).clip(lower=0)
+
+    smaller_len = np.minimum(pg_len[df["pg_idx"].values], atac_len[df["atac_idx"].values])
+    frac = overlap_len / smaller_len
+
+    df = df[frac >= min_overlap_frac]
+    return df[["pg_idx", "atac_idx"]]
