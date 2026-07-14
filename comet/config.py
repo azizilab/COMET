@@ -38,38 +38,36 @@ TRAIN = {
     "N_EPOCHS": 120,
     "PHASE1_EPOCHS": 40,
     "BATCH_SIZE": 512,
+    "N_TOP_HVG": 3000,
     "LR_GRN": 5e-4,
     "LR_VEL": 2e-4,
+    "GEO_TAU_SCALE": 0.5,  # smaller -> sharper geometric targets q (less mixing)
+    "LAMBDA_GRN": 1.0, # weight of GRN-propagated lead inside the velocity disequilibrium
     "CLIP_NORM": 1.0,
     "PLOT_EVERY": 10,
     "USE_LOCAL_ATAC": True,
-    "N_CLUSTERS": 20,
+    "N_CLUSTERS": 40,
     "NEIGHBOR_SPACE": "decipher", # change to "pca" to optimize for PCA appearance
     "WEIGHTS_PHASE1": {
         "MASK": 2.0,
         "SPARSE": 5e-3,
         "ACCESS": 0.1,
         "DIVERSE": 10.0,
-        "ENTROPY": 1.0,
-        "LD": 1.0,
+        "ANCHOR": 1.0,
+        "LD": 0.5,
         "LD_REG": 0.1,
-        "DIRICH": 2.0,
-
     },
 
     "WEIGHTS_PHASE2": {
         "MASK": 1.0,
         "VEL": 3.0,
-        "ATAC": 2.0,
+        "ATAC": 1.0,
         "SPARSE": 5e-3,
         "ACCESS": 0.1,
-        "SMOOTH": 0.01,
         "DIVERSE": 5.0,
-        "ENTROPY": 1.0,
         "DENSE": 0.05,
         "DIV": 0.5,
-        "SOURCE": 1.0,
-        "DIRICH": 1.0,
+        "ANCHOR": 0.5,
         "LD": 0.3,
         "LD_REG": 0.05,
 

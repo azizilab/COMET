@@ -60,7 +60,7 @@ def project_to_2d(V_pred_full, X_2d_vis, X_full,
     return V_emb2
 
 
-def build_local_atac(
+def build_local_atac1(
     X_rna,            # (C_rna, G)  RNA expression (subset genes)
     gene_activity,    # (C_atac, G) ATAC gene-activity matrix
     rna_2d,           # (C_rna, 2)  e.g. V_dec2 or X_pca2d
@@ -133,47 +133,58 @@ def build_local_atac(
           f"{np.mean(local_gene_access > 0.05):.1%}")
     return local_gene_access, cluster_labels
 
+def build_local_atac(X_rna, gene_activity, cluster_space, n_clusters=40, k_atac=8, seed=42):
+    """Per-cell ATAC accessibility via pseudo-bulk cluster matching (unpaired-safe).
 
-
-def build_peak_overlap_map(peak_gene_peaks, atac_peak_names, min_overlap_frac=0.5):
+    cluster_space should be a space that actually resolves cell state well — pass
+    the Decipher LATENT (Z_dec), not the 2D viz coordinates. Clustering in 2D
+    viz space throws away most of the resolution the model has learned and was
+    the main source of blocky, noisy per-cell ATAC estimates near the hub, which
+    is where the directional noise in the displacement field was coming from.
     """
-    peak_gene_peaks: list/array of strings like 'chr1-237511-238011' (peak_gene format)
-    atac_peak_names: list/array of strings like 'chr1:3002478-3002968' (peak_to_idx_atac format)
-    min_overlap_frac: minimum fraction of the SMALLER peak's length that must be covered
-                      by the overlap for it to count as a match.
+    G = X_rna.shape[1]
+    km = MiniBatchKMeans(n_clusters=n_clusters, random_state=seed, n_init=5)
+    labels = km.fit_predict(cluster_space)
+    cluster_rna = np.zeros((n_clusters, G), dtype=np.float32)
+    for c in range(n_clusters):
+        m = labels == c
+        if m.sum():
+            cluster_rna[c] = X_rna[m].mean(0)
+    cr = normalize(cluster_rna, norm='l2'); ga = normalize(gene_activity, norm='l2')
+    _, aidx = NearestNeighbors(n_neighbors=k_atac).fit(ga).kneighbors(cr)
+    cluster_access = np.stack([gene_activity[aidx[c]].mean(0) for c in range(n_clusters)])
+    local = cluster_access[labels]
+    lo = local.min(0, keepdims=True); hi = local.max(0, keepdims=True)
+    return ((local - lo) / (hi - lo + 1e-8)).astype(np.float32)
 
-    Returns: DataFrame with columns [pg_idx, atac_idx] — every valid overlapping pair,
-             indices referring to positions in the input lists.
+def knn_smooth(signal, neighbor_idx, k=10):
+    """Average a per-cell, per-gene SCALAR signal over its k nearest latent-space
+    neighbors. This is now the only denoising step in the pipeline. It's safe to
+    apply to a scalar accessibility feature because there's no direction to
+    cancel — unlike smoothing a displacement vector, this can only reduce noise,
+    never erase a bifurcation.
     """
-    def parse(peaks):
-        chroms, starts, ends = [], [], []
-        for p in peaks:
-            chrom, s, e = p.replace(":", "-").split("-")
-            chroms.append(chrom); starts.append(int(s)); ends.append(int(e))
-        return chroms, starts, ends
+    nb = neighbor_idx[:, :k]
+    return signal[nb].mean(axis=1)
 
-    c1, s1, e1 = parse(peak_gene_peaks)
-    pg_gr = pr.PyRanges(chromosomes=c1, starts=s1, ends=e1)
-    pg_gr.pg_idx = np.arange(len(peak_gene_peaks))
-    pg_len = np.array(e1) - np.array(s1)
+def select_archetypes_fps(Z, D, seed=0):
+    """Furthest-point sampling → indices of D extreme cells (manifold corners)."""
+    rng = np.random.default_rng(seed)
+    c   = Z.mean(axis=0)
+    first = int(np.argmax(((Z - c) ** 2).sum(1)))
+    idx = [first]
+    dmin = ((Z - Z[first]) ** 2).sum(1)
+    for _ in range(D - 1):
+        nxt = int(np.argmax(dmin))
+        idx.append(nxt)
+        dmin = np.minimum(dmin, ((Z - Z[nxt]) ** 2).sum(1))
+    return np.array(idx, dtype=int)
 
-    c2, s2, e2 = parse(atac_peak_names)
-    atac_gr = pr.PyRanges(chromosomes=c2, starts=s2, ends=e2)
-    atac_gr.atac_idx = np.arange(len(atac_peak_names))
-    atac_len = np.array(e2) - np.array(s2)
-
-    joined = pg_gr.join(atac_gr)
-    df = joined.df
-    if df.empty:
-        return df.assign(pg_idx=[], atac_idx=[])
-
-    # overlap length = min(end1,end2) - max(start1,start2)
-    overlap_start = np.maximum(df["Start"], df["Start_b"])
-    overlap_end   = np.minimum(df["End"], df["End_b"])
-    overlap_len   = (overlap_end - overlap_start).clip(lower=0)
-
-    smaller_len = np.minimum(pg_len[df["pg_idx"].values], atac_len[df["atac_idx"].values])
-    frac = overlap_len / smaller_len
-
-    df = df[frac >= min_overlap_frac]
-    return df[["pg_idx", "atac_idx"]]
+def geometric_soft_targets(Z, arch_idx, tau_scale=0.5):
+    """q_i = softmax(-||z_i - z_arch||^2 / tau). Returns (N, D), rows sum to 1."""
+    A = Z[arch_idx]                                    # (D, latent)
+    d2 = ((Z[:, None, :] - A[None, :, :]) ** 2).sum(-1)  # (N, D)
+    tau = np.median(d2) * tau_scale + 1e-8
+    q = np.exp(-d2 / tau)
+    q = q / (q.sum(1, keepdims=True) + 1e-8)
+    return q.astype(np.float32)

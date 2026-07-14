@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from sklearn.cluster import KMeans
 
-class GRNDictionary(nn.Module):
+class GRNDictionary1(nn.Module):
     def __init__(self, G: int, T: int, M: np.ndarray, D: int = 4):
         super().__init__()
         self.D = D
@@ -102,55 +102,88 @@ class GRNDictionary(nn.Module):
         return ((col_norms - target.unsqueeze(0)) ** 2).mean()
     
 
+class GRNDictionary(nn.Module):
+    def __init__(self, G, T, M, D=4):
+        super().__init__()
+        self.D, self.G, self.T = D, G, T
+        self.W_raw  = nn.Parameter(torch.zeros(D, G, T))   # residual atoms
+        self.W_base = nn.Parameter(torch.zeros(G, T))      # shared base
+        self.register_buffer("M", torch.tensor(M, dtype=torch.float32))
+        self.register_buffer("TF_access", torch.zeros(T))
+        self.register_buffer("mean_tf",  torch.zeros(T))
 
-def initialize_grn_dictionary_from_clusters(
-    X: np.ndarray,          # (C, G) RNA
-    V_dec2: np.ndarray,     # (C, 2) for clustering
-    M: np.ndarray,          # (G, T) motif mask
-    D: int,                 # number of atoms
-    A_tfs: np.ndarray,
-    sub_g2i: dict,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Returns:
-      cluster_labels : (C,) int — which cluster each cell belongs to
-      W_init         : (D, G, T) float32 — per-atom initial weights
-    """
-    # 1. Cluster in Decipher space (already a good low-dim representation)
-    print(f"Clustering into {D} groups in Decipher space...")
-    km = KMeans(n_clusters=D, n_init=10)
-    cluster_labels = km.fit_predict(V_dec2)
-    
-    # 2. For each cluster, find marker genes (high mean, low in others)
-    W_init = np.zeros((D, X.shape[1], len(A_tfs)), dtype=np.float32)
-    
+    def init_from_atoms(self, W_init):
+        with torch.no_grad():
+            self.W_raw.copy_(torch.tensor(np.arctanh(np.clip(W_init, -0.95, 0.95)),
+                                          dtype=torch.float32))
+        print("GRN atoms initialized from archetype soft-LFC profiles (base starts at 0).")
+
+    @property
+    def A_dict(self):
+        return torch.tanh(self.W_raw) * self.M.unsqueeze(0)   # (D, G, T)
+
+    @property
+    def A_base(self):
+        return torch.tanh(self.W_base) * self.M               # (G, T)
+
+    def _atom_term(self, X_in, weights):
+        # sum_d w_d (X_in @ A_d.T) without materializing (B,G,T)
+        P = torch.einsum('bt,dgt->dbg', X_in, self.A_dict)    # (D, B, G)
+        return (P * weights.T.unsqueeze(-1)).sum(0)           # (B, G)
+
+    def predict_rna(self, X_TF, weights):
+        """Steady-state RNA prediction from TF expression (base + residual atoms)."""
+        return (X_TF @ self.A_base.T) + self._atom_term(X_TF, weights)
+
+    def production_from_lead(self, tf_lead, weights):
+        """Effective per-cell GRN applied to the ATAC->RNA TF lead (for velocity)."""
+        return (tf_lead @ self.A_base.T) + self._atom_term(tf_lead, weights)
+
+    def effective_A(self, weights_vec):
+        """weights_vec: (D,) -> (G, T) effective GRN including base."""
+        return self.A_base + torch.einsum('d,dgt->gt', weights_vec, self.A_dict)
+
+    def sparsity_loss(self):
+        return torch.abs(self.A_dict).mean() + torch.abs(self.A_base).mean()
+
+    def diversity_loss(self):
+        """Keep residual atoms distinct in parameter AND prediction space."""
+        A_flat = self.A_dict.reshape(self.D, -1)
+        A_norm = F.normalize(A_flat, dim=1)
+        eye = torch.eye(self.D, device=A_flat.device)
+        param_div = ((A_norm @ A_norm.T) * (1 - eye)).abs().mean()
+
+        pred = torch.einsum('dgt,t->dg', self.A_dict, self.mean_tf)
+        pred = F.normalize(pred, dim=1)
+        pred_div = ((pred @ pred.T) * (1 - eye)).abs().mean()
+        return 0.5 * param_div + 0.5 * pred_div
+
+    def tf_access_consistency_loss(self):
+        closed = 1.0 - self.TF_access.clamp(0, 1)
+        return (torch.abs(self.A_dict) * closed.unsqueeze(0).unsqueeze(0)).mean()
+
+
+
+
+def init_atoms_from_soft_targets(X, q, M, A_tfs):
+    """Soft-LFC init: each atom's weights come from cells weighted toward its archetype."""
+    D = q.shape[1]
+    G = X.shape[1]
+    W_init = np.zeros((D, G, len(A_tfs)), dtype=np.float32)
     for d in range(D):
-        in_mask  = cluster_labels == d
-        out_mask = ~in_mask
-        
-        if in_mask.sum() < 3:
-            continue
-        
-        # Mean expression inside vs outside this cluster
-        mean_in  = X[in_mask].mean(axis=0)    # (G,)
-        mean_out = X[out_mask].mean(axis=0)   # (G,)
-        
-        # Log fold change as a simple specificity score
+        w = q[:, d]                                   # (N,) soft membership
+        wsum = w.sum() + 1e-8
+        mean_in  = (X * w[:, None]).sum(0) / wsum
+        mean_out = (X * (1 - w)[:, None]).sum(0) / ((1 - w).sum() + 1e-8)
         lfc = np.log1p(mean_in) - np.log1p(mean_out)  # (G,)
-        
-        # Initialize weights for this atom proportional to cluster-specific LFC
-        # Only where motif mask allows (M > 0)
         for t_i in range(len(A_tfs)):
-            col = M[:, t_i]                   # (G,) binary motif mask
+            col = M[:, t_i]
             if col.sum() == 0:
                 continue
-            # Weight = LFC scaled to [-0.3, 0.3] within motif-allowed genes
             lfc_masked = lfc * col
-            lfc_range  = np.abs(lfc_masked).max() + 1e-8
-            W_init[d, :, t_i] = lfc_masked / lfc_range * 0.3
-    
-    print(f"Cluster sizes: {[int((cluster_labels==d).sum()) for d in range(D)]}")
-    return cluster_labels, W_init
+            rng = np.abs(lfc_masked).max() + 1e-8
+            W_init[d, :, t_i] = lfc_masked / rng * 0.3
+    return W_init
 
 
 

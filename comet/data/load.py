@@ -6,6 +6,7 @@ import scipy.io
 import anndata as ad
 import torch
 import re
+import scanpy as sc
 
 from scipy.sparse import lil_matrix, issparse
 from sklearn.preprocessing import normalize
@@ -74,6 +75,16 @@ def build_universe(
         `.X` is already the intended representation (e.g. raw counts).
     """
 
+    rna_adata = rna_adata.layers[rna_layer] if rna_layer else rna_adata.X
+
+    # standard scanpy normalization
+    sc.pp.normalize_total(rna_adata, target_sum=1e4)
+    sc.pp.log1p(rna_adata)
+
+    # HVG selection (kept, but TFs are always protected below)
+    sc.pp.highly_variable_genes(rna_adata, n_top_genes=config["TRAIN"]["N_TOP_HVG"], subset=False)
+    hvg_genes = set(rna_adata.var_names[rna_adata.var['highly_variable']])
+
     # RNA reference space
     gene_names_all = np.array(rna_adata.var_names.astype(str))
     gene_to_idx_full = {g: i for i, g in enumerate(gene_names_all)}
@@ -120,11 +131,16 @@ def build_universe(
 
     # filter genes/TFs to get active "universe"
     genes_in_peaks = set(peak_gene["gene"].astype(str).unique())
-    A_genes = np.array([g for g in gene_names_all if g in genes_in_peaks], dtype=str)
+    #A_genes = np.array([g for g in gene_names_all if g in genes_in_peaks], dtype=str)
     A_tfs = np.array(
         [t for t in A_tfs if t.upper() in motif_tf_to_idx],
         dtype=str
     )
+
+    A_genes = np.array([
+        g for g in gene_names_all
+        if (g in genes_in_peaks and g in hvg_genes) or g in A_tfs
+    ], dtype=str)
 
     # index arrays
     gene_idx = np.array([gene_to_idx_full[g] for g in A_genes], dtype=int)
