@@ -8,9 +8,10 @@ import torch
 import re
 import scanpy as sc
 
+from config import TRAIN
+
 from scipy.sparse import lil_matrix, issparse
 from sklearn.preprocessing import normalize
-from utils.geometry import build_peak_overlap_map
 
 
 def load_datasets(config):
@@ -75,14 +76,12 @@ def build_universe(
         `.X` is already the intended representation (e.g. raw counts).
     """
 
-    rna_adata = rna_adata.layers[rna_layer] if rna_layer else rna_adata.X
-
-    # standard scanpy normalization
-    sc.pp.normalize_total(rna_adata, target_sum=1e4)
-    sc.pp.log1p(rna_adata)
+    # standard scanpy normalization (operates in place on the given layer, or .X if None)
+    sc.pp.normalize_total(rna_adata, target_sum=1e4, layer=rna_layer)
+    sc.pp.log1p(rna_adata, layer=rna_layer)
 
     # HVG selection (kept, but TFs are always protected below)
-    sc.pp.highly_variable_genes(rna_adata, n_top_genes=config["TRAIN"]["N_TOP_HVG"], subset=False)
+    sc.pp.highly_variable_genes(rna_adata, n_top_genes=TRAIN["N_TOP_HVG"], subset=False, layer=rna_layer)
     hvg_genes = set(rna_adata.var_names[rna_adata.var['highly_variable']])
 
     # RNA reference space

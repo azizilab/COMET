@@ -65,7 +65,6 @@ TRAIN = {
         "SPARSE": 5e-3,
         "ACCESS": 0.1,
         "DIVERSE": 5.0,
-        "DIV": 0.5,
         "ANCHOR": 0.5,
         "LD": 0.3,
         "LD_REG": 0.05,
@@ -76,6 +75,6 @@ TRAIN = {
         "ETA_MIN": 1e-5
     },
 
-    "OUTPUT_DIR": "/home/elicanter/paul2015_outputs_test",
+    "OUTPUT_DIR": "/home/elicanter/paul2015_outputs_test_newmethod",
 
 }

@@ -145,7 +145,7 @@ def build_local_atac(X_rna, gene_activity, cluster_space, n_clusters=40, k_atac=
         m = labels == c
         if m.sum():
             cluster_rna[c] = X_rna[m].mean(0)
-    cr = normalize(cluster_rna, norm='l2'); ga = normalize(gene_activity, norm='l2')
+    cr = sk_normalize(cluster_rna, norm='l2'); ga = sk_normalize(gene_activity, norm='l2')
     _, aidx = NearestNeighbors(n_neighbors=k_atac).fit(ga).kneighbors(cr)
     cluster_access = np.stack([gene_activity[aidx[c]].mean(0) for c in range(n_clusters)])
     local = cluster_access[labels]

@@ -1,9 +1,9 @@
 from model.encoder import CellStateEncoder
 from model.grn import GRNDictionary, init_atoms_from_soft_targets, masked_reconstruction_loss1
-from model.velocity import DictVelocityHead, velocity_consistency_loss, atac_direction_loss, atac_direction_loss_asymmetric, velocity_smoothness_loss, density_gradient_loss, divergence_loss
+from model.velocity import DictVelocityHead, velocity_consistency_loss, atac_direction_loss, atac_direction_loss
 from model.ld_vae import LinearDecoder, plot_ld_embedding
 from utils.graph import build_neighbor_index
-from utils.geometry import project_to_2d, build_local_atac, select_archetypes_fps, geometric_soft_targets, zscore_cols
+from utils.geometry import project_to_2d, build_local_atac, select_archetypes_fps, geometric_soft_targets, zscore_cols, knn_smooth
 from viz.visualization import VelocityGIFMaker
 
 import os
@@ -58,9 +58,11 @@ def run_training(data, model_config, train_config):
 
     USE_LOCAL_ATAC = train_config["USE_LOCAL_ATAC"]
 
+    neighbor_indices_t = build_neighbor_index(X, V_dec2, Z_dec, mode=train_config["NEIGHBOR_SPACE"], k=15)
+
     if USE_LOCAL_ATAC:
         # This assumes 'gene_activity' is your (C_atac, G) matrix
-        local_access, _ = build_local_atac(X, gene_activity, Z_dec, n_clusters=train_config["N_CLUSTERS"], k_atac=8) # number of GRN dictionary atoms)
+        local_access = build_local_atac(X, gene_activity, Z_dec, n_clusters=train_config["N_CLUSTERS"], k_atac=8)
         gene_access_t = torch.tensor(local_access, dtype=torch.float32)
         # Denoise the raw per-cell ATAC estimate over its latent-space neighborhood.
         # This replaces the old displacement-vector smoothing loss as the pipeline's
@@ -103,7 +105,6 @@ def run_training(data, model_config, train_config):
     pseudo_norm_t = torch.tensor(pseudo_norm, dtype=torch.float32)
     
     dataset = TensorDataset(X_t, X_TF_t, cell_idx_t)
-    neighbor_indices_t = build_neighbor_index(X, V_dec2, Z_dec, mode=train_config["NEIGHBOR_SPACE"], k=15)
     
     loader = DataLoader(dataset, batch_size=BATCH_SIZE,
                         sampler=RandomSampler(dataset, replacement=False),
@@ -117,8 +118,6 @@ def run_training(data, model_config, train_config):
     W1_SPARSE  = W1["SPARSE"]
     W1_ACCESS  = W1["ACCESS"]
     W1_DIVERSE = W1["DIVERSE"] # HIGH — forces atoms apart from the start
-    W1_ENTROPY = W1["ENTROPY"] # penalize uniform mixing weights
-    W1_DIRICH  = W1["DIRICH"]
     W1_LD      = W1["LD"] # reconstruction weight — raised 10×
     W1_LD_REG  = W1["LD_REG"] # orthogonality + variance regulariser
 
@@ -128,12 +127,7 @@ def run_training(data, model_config, train_config):
     W2_ATAC    = W2["ATAC"]
     W2_SPARSE  = W2["SPARSE"]
     W2_ACCESS  = W2["ACCESS"]
-    W2_SMOOTH  = W2["SMOOTH"]
     W2_DIVERSE = W2["DIVERSE"]
-    W2_ENTROPY = W2["ENTROPY"]
-    W2_DENSE   = W2["DENSE"]
-    W2_DIV     = W2["DIV"]
-    W2_DIRICH  = W2["DIRICH"] # push low-pseudotime cells outward
     W2_LD      = W2["LD"]
     W2_LD_REG  = W2["LD_REG"]
     
