@@ -147,4 +147,65 @@ class VelocityGIFMaker:
         w, h = last.size
         last.resize((w * 2, h * 2), Image.LANCZOS).save(path, dpi=(300, 300))
         print(f"Saved slide PNG: {path}")
- 
+
+
+def plot_velocity_stream(X_2d, V_2d, pseudo_norm, save_path=None,
+                          title="Streamline Velocity (ATAC-led)",
+                          xlabel="Decipher 1", ylabel="Decipher 2"):
+    """Final scVelo-style streamline plot (Step 16 of the reference notebook).
+
+    Unlike the training-time GIF frames (which also mask out low-speed grid
+    points so the animation looks clean epoch-to-epoch), this final plot masks
+    ONLY by density: the low-speed hub near a branch point is real biology
+    (cells there are genuinely less committed) and must not be hidden.
+    """
+    fig, ax = plt.subplots(figsize=(4, 3.5), dpi=150)
+    sc = ax.scatter(X_2d[:, 0], X_2d[:, 1], c=pseudo_norm, cmap="viridis",
+                     s=20, alpha=0.6, edgecolors='none', rasterized=True)
+
+    grid_n = 120
+    # cast to Python float (float64): X_2d is typically float32, and linspace on
+    # float32 endpoints accumulates enough rounding error over 120 points that
+    # matplotlib's streamplot rejects the grid as "not equally spaced".
+    x_min, x_max = float(X_2d[:, 0].min()), float(X_2d[:, 0].max())
+    y_min, y_max = float(X_2d[:, 1].min()), float(X_2d[:, 1].max())
+    Xg, Yg = np.meshgrid(np.linspace(x_min, x_max, grid_n),
+                          np.linspace(y_min, y_max, grid_n))
+    grid_points = np.c_[Xg.ravel(), Yg.ravel()]
+
+    sub = np.random.choice(len(X_2d), min(3000, len(X_2d)), replace=False)
+    _, gi = NearestNeighbors(n_neighbors=20).fit(X_2d[sub]).kneighbors(grid_points)
+    V_grid = V_2d[sub][gi].mean(1)
+
+    nbrs_cells = NearestNeighbors(n_neighbors=1).fit(X_2d)
+    dist_to_cells = nbrs_cells.kneighbors(grid_points)[0].ravel()
+    threshold = np.percentile(dist_to_cells, 40)
+    density_mask = dist_to_cells < threshold   # density-only: no speed masking
+    if density_mask.sum() == 0:
+        density_mask = np.ones(len(grid_points), dtype=bool)
+
+    tree = cKDTree(grid_points[density_mask])
+    _, nn = tree.query(grid_points, k=1)
+    U = V_grid[density_mask][nn, 0].reshape(Xg.shape)
+    W = V_grid[density_mask][nn, 1].reshape(Yg.shape)
+    U_flat, W_flat = U.ravel(), W.ravel()
+    U_flat[~density_mask] = 0.0
+    W_flat[~density_mask] = 0.0
+    U = gaussian_filter(U_flat.reshape(Xg.shape), 1.2)
+    W = gaussian_filter(W_flat.reshape(Yg.shape), 1.2)
+
+    ax.streamplot(Xg, Yg, U, W, color="black", density=1.6, linewidth=1,
+                  arrowsize=1, arrowstyle='-|>', minlength=0.2,
+                  integration_direction='both', zorder=3)
+    ax.set_xlabel(xlabel, fontsize=11, fontweight='bold')
+    ax.set_ylabel(ylabel, fontsize=11, fontweight='bold')
+    ax.set_title(title, fontsize=12, pad=12, fontweight='bold')
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    cbar = plt.colorbar(sc, ax=ax, fraction=0.04, pad=0.04)
+    cbar.set_label("Pseudotime")
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, bbox_inches='tight', dpi=150)
+    plt.close(fig)
+    if save_path:
+        print(f"Saved streamline velocity plot: {save_path}")

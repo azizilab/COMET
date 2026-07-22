@@ -29,12 +29,12 @@ DATA = {
 }
 
 MODEL = {
-    "D_ATOMS": 8,
+    "D_ATOMS": 6,
     "LD_HIDDEN": 64,
 }
 
 TRAIN = {
-    "NUM_RUNS": 5,
+    "NUM_RUNS": 1,
     "N_EPOCHS": 120,
     "PHASE1_EPOCHS": 40,
     "BATCH_SIZE": 512,
@@ -43,10 +43,19 @@ TRAIN = {
     "LR_VEL": 2e-4,
     "GEO_TAU_SCALE": 0.5,  # smaller -> sharper geometric targets q (less mixing)
     "LAMBDA_GRN": 1.0, # weight of GRN-propagated lead inside the velocity disequilibrium
+    # trajectory inference propagates the TF lead through only the top fraction
+    # (by |weight|, per module) of each GRN's edges — GRN inference itself
+    # (reconstruction, sparsity/diversity/access losses) is never pruned.
+    "GRN_PRUNE_FRAC": 0.1,
     "CLIP_NORM": 1.0,
     "PLOT_EVERY": 10,
     "USE_LOCAL_ATAC": True,
     "N_CLUSTERS": 40,
+    # kNN smoothing strength for the ATAC/RNA lead (applied to BOTH modalities
+    # equally before z-scoring, plus once more on the resulting lead). Smaller
+    # for small branching datasets so fan-out survives; larger for linear/large
+    # data. This is the one velocity knob worth tuning per dataset.
+    "K_MOMENT": 10,
     "NEIGHBOR_SPACE": "latent", # change to "pca" to optimize for PCA appearance
     "WEIGHTS_PHASE1": {
         "MASK": 2.0,
@@ -75,6 +84,6 @@ TRAIN = {
         "ETA_MIN": 1e-5
     },
 
-    "OUTPUT_DIR": "/home/elicanter/paul2015_outputs_newmethod_d8",
+    "OUTPUT_DIR": "/home/elicanter/paul2015_outputs_newmethod3_d6",
 
 }

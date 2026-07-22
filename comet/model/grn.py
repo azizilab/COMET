@@ -132,12 +132,60 @@ class GRNDictionary(nn.Module):
         return (P * weights.T.unsqueeze(-1)).sum(0)           # (B, G)
 
     def predict_rna(self, X_TF, weights):
-        """Steady-state RNA prediction from TF expression (base + residual atoms)."""
+        """Steady-state RNA prediction from TF expression (base + residual atoms).
+        Always uses the full, dense A_base/A_dict — GRN inference itself is never
+        pruned, only the trajectory-propagation path in production_from_lead is.
+        """
         return (X_TF @ self.A_base.T) + self._atom_term(X_TF, weights)
 
-    def production_from_lead(self, tf_lead, weights):
-        """Effective per-cell GRN applied to the ATAC->RNA TF lead (for velocity)."""
-        return (tf_lead @ self.A_base.T) + self._atom_term(tf_lead, weights)
+    @staticmethod
+    def _prune_top_frac(W, frac):
+        """Zero out everything but the top `frac` fraction (by |weight|) of each
+        module's entries, independently per module. W: (D, G, T) — D modules
+        (e.g. the D atoms, or 1 for A_base treated as a single module).
+
+        Deliberately per-module rather than per-cell: the per-cell effective GRN
+        (A_base + sum_d w_d*A_d) is never materialized elsewhere in this class —
+        _atom_term uses an einsum specifically to avoid forming a (B, G, T)
+        tensor — and thresholding per cell would require building exactly that,
+        for every batch. Per-module thresholding instead works on the fixed-size
+        (D, G, T) parameter tensor itself, independent of batch size, so it costs
+        a handful of topk calls over small matrices rather than a memory blowup.
+        A single global threshold across all modules was considered too, but a
+        module with systematically larger weights would then dominate the cutoff
+        and could zero out another module's real (but smaller-magnitude) signal.
+        """
+        D = W.shape[0]
+        with torch.no_grad():
+            flat_abs = W.detach().abs().reshape(D, -1)
+            n_nonzero = (flat_abs > 0).sum(dim=1)
+            keep = torch.zeros_like(flat_abs, dtype=torch.bool)
+            for d in range(D):
+                nnz = int(n_nonzero[d].item())
+                if nnz == 0:
+                    continue
+                k = max(1, int(round(nnz * frac)))
+                if k >= nnz:
+                    keep[d] = flat_abs[d] > 0
+                else:
+                    thresh = torch.topk(flat_abs[d], k).values.min()
+                    keep[d] = flat_abs[d] >= thresh
+            keep = keep.reshape(W.shape)
+        return W * keep
+
+    def production_from_lead(self, tf_lead, weights, prune_frac=0.1):
+        """Effective per-cell GRN applied to the ATAC->RNA TF lead, for trajectory
+        inference. Propagates through a per-module top-`prune_frac` sparsified
+        copy of A_base/A_dict (keep only the strongest `prune_frac` of edges in
+        each module) — GRN inference (predict_rna, and every loss that shapes
+        A_base/A_dict) is untouched and keeps training on the full, dense
+        weights; only this trajectory-propagation path sees the pruned GRN.
+        """
+        A_base_pruned = self._prune_top_frac(self.A_base.unsqueeze(0), prune_frac)[0]   # (G, T)
+        A_dict_pruned = self._prune_top_frac(self.A_dict, prune_frac)                    # (D, G, T)
+        P = torch.einsum('bt,dgt->dbg', tf_lead, A_dict_pruned)   # (D, B, G) — same fast path as _atom_term
+        atom_term = (P * weights.T.unsqueeze(-1)).sum(0)          # (B, G)
+        return (tf_lead @ A_base_pruned.T) + atom_term
 
     def effective_A(self, weights_vec):
         """weights_vec: (D,) -> (G, T) effective GRN including base."""

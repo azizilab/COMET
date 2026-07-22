@@ -47,6 +47,16 @@ class DictVelocityHead1(nn.Module):
     
 
 class DictVelocityHead(nn.Module):
+    """Reverted to the pre-session MLP head. The notebook's diagonal
+    alternative (per-gene log_rate + scalar) has almost no free parameters of
+    its own, so it can't absorb the velocity/ATAC-direction objectives'
+    gradient the way this MLP can — that pressure gets pushed back through
+    disequil into the shared GRN weights instead, which is what caused the
+    runaway loss on this dataset (confirmed by isolating it: swapping only
+    this head back to the MLP, with every other change kept, restores a
+    normal decreasing loss trajectory). See git history for the diagonal
+    version if revisiting this tradeoff later.
+    """
     def __init__(self, G, hidden=256):
         super().__init__()
         self.net = nn.Sequential(
@@ -58,7 +68,7 @@ class DictVelocityHead(nn.Module):
 
     def forward(self, rna, disequil):
         return self.net(disequil) * self.scale
-    
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════
