@@ -163,7 +163,13 @@ def knn_smooth(signal, neighbor_idx, k=10):
     return signal[nb].mean(axis=1)
 
 def select_archetypes_fps(Z, D, seed=0):
-    """Furthest-point sampling → indices of D extreme cells (manifold corners)."""
+    """Furthest-point sampling → indices of D extreme cells (manifold corners).
+
+    Corners land on distinct terminal fates, which is what gives the per-cell GRNs
+    fate contrast. k-means centroids were tried instead (to avoid the sparse-corner
+    'dead atom'), but they cluster in the dense progenitor hub and destroyed
+    cell-specific fate matching (acc 0.19 -> 0.04), so FPS is kept.
+    """
     rng = np.random.default_rng(seed)
     c   = Z.mean(axis=0)
     first = int(np.argmax(((Z - c) ** 2).sum(1)))

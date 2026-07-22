@@ -29,7 +29,7 @@ DATA = {
 }
 
 MODEL = {
-    "D_ATOMS": 4,
+    "D_ATOMS": 8,
     "LD_HIDDEN": 64,
 }
 
@@ -47,7 +47,7 @@ TRAIN = {
     "PLOT_EVERY": 10,
     "USE_LOCAL_ATAC": True,
     "N_CLUSTERS": 40,
-    "NEIGHBOR_SPACE": "decipher", # change to "pca" to optimize for PCA appearance
+    "NEIGHBOR_SPACE": "latent", # change to "pca" to optimize for PCA appearance
     "WEIGHTS_PHASE1": {
         "MASK": 2.0,
         "SPARSE": 5e-3,
@@ -75,6 +75,6 @@ TRAIN = {
         "ETA_MIN": 1e-5
     },
 
-    "OUTPUT_DIR": "/home/elicanter/paul2015_outputs_test_newmethod",
+    "OUTPUT_DIR": "/home/elicanter/paul2015_outputs_newmethod_d8",
 
 }
