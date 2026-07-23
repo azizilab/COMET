@@ -1,6 +1,14 @@
 #BASE = "/home/elicanter/datasets/hematopoiesis/"
 
-BASE = "/home/elicanter/datasets/paul2015data/"
+# --- BEELINE mHSC-E benchmark (Nestorowa 2016 RNA + reused mouse ATAC prior) ---
+# To evaluate GRN inference against BEELINE gold-standard networks, swap BASE to
+# the line below and DATA to the NESTOROWA_MHSC_E block further down, then point
+# OUTPUT_DIR somewhere new. Built by scripts/build_nestorowa_mhsc.py; decipher
+# embeddings from comet/nestorowa_decipher.ipynb. Score with
+# scripts/eval_grn_beeline.py against the run's OUTPUT_DIR.
+BASE = "/home/elicanter/datasets/nestorowa_mhsc_e/"
+
+#BASE = "/home/elicanter/datasets/paul2015data/"
 
 
 # DATA = {
@@ -15,10 +23,13 @@ BASE = "/home/elicanter/datasets/paul2015data/"
 # }
 
 
+# NESTOROWA_MHSC_E — use with BASE = ".../nestorowa_mhsc_e/" above.
+# rna_layer is raw counts (build script writes .X as raw too, but the layer is
+# explicit and matches the Paul convention). ATAC prior files are symlinks to
+# paul2015data, so peak_tf/tf_names/peak_gene/peaks/atac_matrix are identical.
 DATA = {
-    "rna": f"{BASE}/Paul_etal_15_2.h5ad",
-    "rna_layer": "raw_count_int",  # .X here is log1p+scaled (mean~0, 78% negative) --
-                                    # use raw counts instead, matching the Velten run
+    "rna": f"{BASE}/Nestorowa_mHSC_E.h5ad",
+    "rna_layer": "raw_count_int",
     "atac": f"{BASE}/atac_matrix.trimmed.mtx.gz",
     "atac_peaks": f"{BASE}/atac_matrix.trimmed.peaks.txt",
     "peak_tf": f"{BASE}/peak_tf.mtx",
@@ -28,8 +39,21 @@ DATA = {
     "decipher_outputs": f"{BASE}/decipher_embeddings.npz",
 }
 
+# DATA = {
+#     "rna": f"{BASE}/Paul_etal_15_2.h5ad",
+#     "rna_layer": "raw_count_int",  # .X here is log1p+scaled (mean~0, 78% negative) --
+#                                     # use raw counts instead, matching the Velten run
+#     "atac": f"{BASE}/atac_matrix.trimmed.mtx.gz",
+#     "atac_peaks": f"{BASE}/atac_matrix.trimmed.peaks.txt",
+#     "peak_tf": f"{BASE}/peak_tf.mtx",
+#     "tf_names": f"{BASE}/tf_names.txt",
+#     "peak_gene": f"{BASE}/peak_gene.csv",
+#     "peaks": f"{BASE}/peaks.txt",
+#     "decipher_outputs": f"{BASE}/decipher_embeddings.npz",
+# }
+
 MODEL = {
-    "D_ATOMS": 6,
+    "D_ATOMS": 4,
     "LD_HIDDEN": 64,
 }
 
@@ -84,6 +108,6 @@ TRAIN = {
         "ETA_MIN": 1e-5
     },
 
-    "OUTPUT_DIR": "/home/elicanter/paul2015_outputs_newmethod3_d6",
+    "OUTPUT_DIR": "/home/elicanter/nestorowa_test_output",
 
 }

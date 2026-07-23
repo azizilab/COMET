@@ -296,10 +296,9 @@ def build_gene_priors(
     gene_activity = as_dense(gene_activity).astype(np.float32)
     gene_activity = np.log1p(gene_activity)
 
-    cell_idx = np.arange(X.shape[0])
-    #atac_X = as_dense(atac_X)[cell_idx]
-    gene_activity = gene_activity[cell_idx]
-
+    # ATAC is unpaired with RNA, so there is no positional cell correspondence to
+    # truncate to; keep all ATAC cells. build_local_atac remaps to (C_rna, G) via
+    # cluster matching, and gene_access averages over the full ATAC population.
     gene_access = gene_activity.mean(axis=0)
     gene_access = (gene_access - gene_access.min()) / (gene_access.max() - gene_access.min() + 1e-8)
     gene_access_t = torch.tensor(gene_access, dtype=torch.float32)
