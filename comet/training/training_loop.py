@@ -1,6 +1,6 @@
 from model.encoder import CellStateEncoder
-from model.grn import GRNDictionary, init_atoms_from_soft_targets, masked_reconstruction_loss1
-from model.velocity import DictVelocityHead, velocity_consistency_loss, atac_direction_loss, atac_direction_loss
+from model.grn import GRNDictionary, init_atoms_from_soft_targets, masked_reconstruction_loss
+from model.velocity import DictVelocityHead, velocity_consistency_loss, atac_direction_loss
 from model.ld_vae import LinearDecoder, plot_ld_embedding
 from utils.graph import build_neighbor_index
 from utils.geometry import project_to_2d, build_local_atac, select_archetypes_fps, geometric_soft_targets, zscore_cols, knn_smooth
@@ -39,9 +39,8 @@ def run_training(data, model_config, train_config):
 
     M = data["M"] # binary motif mask (G x T), M_gt=1 iff TF t has a binding motif in a peak linked to gene g
 
-    gene_activity = data["gene_activity"] # per-cell local chromatin accessibility (C x G) 
+    gene_activity = data["gene_activity"] # per-cell local chromatin accessibility (C x G)
     gene_access = data["gene_access"] # population-mean chromatin accessibility for each gene (G,)
-    gene_access_t = data["gene_access_t"] # as tensor
 
     TF_access_prior = data["TF_access_prior"] # population-mean chromatin accessibility for each TF locus (T,)
     TF_access_t = torch.tensor(TF_access_prior, dtype=torch.float32)
@@ -57,40 +56,30 @@ def run_training(data, model_config, train_config):
 
     rna_adata = data["rna_adata"] # raw AnnData object for RNA, used for pseudotime and plotting only (not model input)
 
-    
-    # Run once before starting training
-    # Find the local index of each TF within the A_genes list
-    tf_indices_in_G = []
-    for tf_name in A_tfs:
-        if tf_name in sub_g2i:
-            tf_indices_in_G.append(sub_g2i[tf_name])
-        else:
-            # This shouldn't happen based on A_tfs filtering, but for safety:
-            tf_indices_in_G.append(-1) 
-
-    tf_indices_in_G = torch.tensor(tf_indices_in_G, dtype=torch.long)
-
+    # position of each TF within A_genes (-1 shouldn't occur — build_universe
+    # always keeps TFs in A_genes — but guards against a silent misalignment)
+    tf_indices_in_G = torch.tensor(
+        [sub_g2i.get(tf_name, -1) for tf_name in A_tfs], dtype=torch.long
+    )
 
     decipher_data = data["decipher_outputs"]
     Z_dec   = decipher_data["z"].astype(np.float32)   # (C, 10)
     V_dec2  = decipher_data["v"].astype(np.float32)   # (C, 2)
 
-    USE_LOCAL_ATAC = train_config["USE_LOCAL_ATAC"]
     K_MOMENT = train_config["K_MOMENT"]  # kNN smoothing strength for the ATAC/RNA lead
 
     neighbor_indices_t = build_neighbor_index(X, V_dec2, Z_dec, mode=train_config["NEIGHBOR_SPACE"], k=15)
 
-    if USE_LOCAL_ATAC:
-        # This assumes 'gene_activity' is your (C_atac, G) matrix
-        local_access = build_local_atac(X, gene_activity, Z_dec, n_clusters=train_config["N_CLUSTERS"], k_atac=8)
-        gene_access_t = torch.tensor(local_access, dtype=torch.float32)
-        # Denoise the raw per-cell ATAC estimate over its latent-space neighborhood.
-        # This replaces the old displacement-vector smoothing loss as the pipeline's
-        # single denoising step, moved from output to input.
-        local_access = knn_smooth(local_access, neighbor_indices_t.numpy(), k=K_MOMENT)
-    else:
-        # Fallback to your existing global vector (G,)
-        gene_access_t = torch.tensor(gene_access, dtype=torch.float32)
+    # Per-cell accessibility, remapped from the unpaired (C_atac, G) gene_activity
+    # onto the RNA cells by cluster matching.
+    local_access = build_local_atac(X, gene_activity, Z_dec,
+                                    n_clusters=train_config["N_CLUSTERS"], k_atac=8)
+    # Denoise over each cell's latent-space neighborhood. This replaces the old
+    # displacement-vector smoothing loss as the pipeline's single denoising step,
+    # moved from output to input. Both consumers — the lead signal below and the
+    # ATAC-direction loss — use the denoised estimate.
+    local_access = knn_smooth(local_access, neighbor_indices_t.numpy(), k=K_MOMENT)
+    gene_access_t = torch.tensor(local_access, dtype=torch.float32)   # (C, G)
 
     # ── shared, per-gene z-scored lead signal (computed once) ─────────────────────
     # atac_z - rna_z is the ATAC->RNA lead: open-but-quiet genes are primed to rise.
@@ -103,31 +92,31 @@ def run_training(data, model_config, train_config):
     rna_z  = zscore_cols(X_smooth)       # (N, G)
     lead   = knn_smooth(atac_z - rna_z, neighbor_indices_t.numpy(), k=K_MOMENT)   # (N, G)
     lead_t = torch.tensor(lead, dtype=torch.float32)
+    tf_lead_all = lead_t[:, tf_indices_in_G]   # (N, T) — TF slice of the lead, fixed
     print(f"Lead signal ready: atac_z - rna_z (per-cell, per-gene), symmetric kNN-denoise k={K_MOMENT}.")
 
-    # --- SET NUMBER OF RUNS & PHASES HERE ---
     NUM_RUNS = train_config["NUM_RUNS"]
     N_EPOCHS = train_config["N_EPOCHS"]
     PHASE1_EPOCHS = train_config["PHASE1_EPOCHS"] # GRN + encoder warmup (no velocity)
     BATCH_SIZE = train_config["BATCH_SIZE"]
     D_ATOMS = model_config["D_ATOMS"] # number of GRN dictionary atoms
-    # ----------------------------------------
-    
 
     # ── data prep ────────────────────────────────────────────────────────────
     G = X.shape[1]
     T = X_TF.shape[1]
-    
+
     X_t        = torch.tensor(X,    dtype=torch.float32)
     X_TF_t     = torch.tensor(X_TF, dtype=torch.float32)
     cell_idx_t = torch.arange(X_t.size(0))
 
-    #pseudo = rna_adata.obs["facs_pseudotime"].astype(np.float32)
-    #pseudo = rna_adata.obs["dpt_pseudotime"].astype(np.float32)
-    pseudo_norm = np.zeros(X_t.size(0), dtype=np.float32)
-    #pseudo_norm = (pseudo.values - pseudo.min()) / (np.ptp(pseudo.values) + 1e-8)
-    pseudo_norm_t = torch.tensor(pseudo_norm, dtype=torch.float32)
-    
+    # Plot colouring only — never a model input. None gives a flat colour.
+    pseudotime_col = train_config["PSEUDOTIME_COL"]
+    if pseudotime_col is None:
+        pseudo_norm = np.zeros(X_t.size(0), dtype=np.float32)
+    else:
+        pseudo = rna_adata.obs[pseudotime_col].to_numpy(dtype=np.float32)
+        pseudo_norm = (pseudo - pseudo.min()) / (np.ptp(pseudo) + 1e-8)
+
     dataset = TensorDataset(X_t, X_TF_t, cell_idx_t)
     
     # drop_last=False: with 1071 cells the old drop_last=True discarded the ragged
@@ -139,30 +128,14 @@ def run_training(data, model_config, train_config):
                         sampler=RandomSampler(dataset, replacement=False),
                         drop_last=False)
     
+    # loss weights: Phase 1 = GRN + encoder warmup, Phase 2 = joint (adds VEL/ATAC)
     W1 = train_config["WEIGHTS_PHASE1"]
     W2 = train_config["WEIGHTS_PHASE2"]
 
-    # ── loss weights (Phase 1: GRN + Encoder warmup) ─────────────────────────
-    W1_MASK    = W1["MASK"]
-    W1_SPARSE  = W1["SPARSE"]
-    W1_ACCESS  = W1["ACCESS"]
-    W1_ACCESS_GENE = W1["ACCESS_GENE"]
-    W1_DIVERSE = W1["DIVERSE"] # HIGH — forces atoms apart from the start
-    W1_LD      = W1["LD"] # reconstruction weight — raised 10×
-    W1_LD_REG  = W1["LD_REG"] # orthogonality + variance regulariser
-
-    # ── loss weights (Phase 2: Joint) ────────────────────────────────────────
-    W2_MASK    = W2["MASK"]
-    W2_VEL     = W2["VEL"]
-    W2_ATAC    = W2["ATAC"]
-    W2_SPARSE  = W2["SPARSE"]
-    W2_ACCESS  = W2["ACCESS"]
-    W2_ACCESS_GENE = W2["ACCESS_GENE"]
-    W2_DIVERSE = W2["DIVERSE"]
-    W2_LD      = W2["LD"]
-    W2_LD_REG  = W2["LD_REG"]
-    
+    CLIP_NORM  = train_config["CLIP_NORM"]
     PLOT_EVERY = train_config["PLOT_EVERY"]
+    LAMBDA_GRN = train_config["LAMBDA_GRN"]         # weight of the GRN-propagated lead
+    GRN_PRUNE_FRAC = train_config["GRN_PRUNE_FRAC"] # top edge fraction used for propagation
     base_path = train_config["OUTPUT_DIR"]  # Defined here so the check can use it
     os.makedirs(base_path, exist_ok=True)
 
@@ -180,8 +153,8 @@ def run_training(data, model_config, train_config):
 
         if run_exists:
             print(f"\n::: Run {run_i} already exists. Skipping... :::")
-            # Set 'd' as a fallback so the plotting code at the very end doesn't throw a NameError
-            d = os.path.join(base_path, f"run{run_i}") if run_i > 0 else base_path
+            # keep last_dir defined for the LD-biplot block after the run loop
+            last_dir = os.path.join(base_path, f"run{run_i}") if run_i > 0 else base_path
             continue
         # ───────────────────────────────────────────────────────────────────────
 
@@ -205,8 +178,16 @@ def run_training(data, model_config, train_config):
         cell_encoder = CellStateEncoder(G=G, D=D_ATOMS)
     
         vel_head = DictVelocityHead(G=G)
-        # Linear decoder for interpretable 2D embedding
-        ld_decoder = LinearDecoder(hidden=64, G=G, ld_dim=2)
+
+        # Linear decoder for the interpretable 2D embedding. It consumes the
+        # encoder's hidden output directly, so LD_HIDDEN is not free — it has to
+        # match cell_encoder.h_out (the encoder's hidden // 2).
+        LD_HIDDEN = model_config["LD_HIDDEN"]
+        assert LD_HIDDEN == cell_encoder.h_out, (
+            f"MODEL['LD_HIDDEN']={LD_HIDDEN} must equal the encoder's output width "
+            f"({cell_encoder.h_out})"
+        )
+        ld_decoder = LinearDecoder(hidden=LD_HIDDEN, G=G, ld_dim=2)
 
         # ── cluster-based initialization ──────────────────────────────────────
 
@@ -229,13 +210,14 @@ def run_training(data, model_config, train_config):
         cell_encoder.init_from_soft_targets(X, q_target, n_epochs=40)
     
         # ── optimizers ────────────────────────────────────────────────────────
-        opt_grn = torch.optim.AdamW(
-            list(grn.parameters()) + 
-            list(cell_encoder.parameters()) + 
-            list(ld_decoder.parameters()),
-            lr=train_config["LR_GRN"]
-        )
-        
+        # GRN, encoder and linear decoder are trained together by opt_grn;
+        # the velocity head has its own optimizer and only runs in Phase 2.
+        grn_params = (list(grn.parameters()) +
+                      list(cell_encoder.parameters()) +
+                      list(ld_decoder.parameters()))
+
+        opt_grn = torch.optim.AdamW(grn_params, lr=train_config["LR_GRN"])
+
         opt_vel = torch.optim.AdamW(vel_head.parameters(), lr=train_config["LR_VEL"])
     
         sch_grn = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -267,12 +249,14 @@ def run_training(data, model_config, train_config):
             epoch_losses = []
             epoch_terms  = defaultdict(list)   # raw (unweighted) per-term diagnostics
 
+            W = W1 if phase == 1 else W2
+
             for rna_b, tf_b, batch_idx in loader:
                 # Compute mix_weights ONCE — shared by all loss terms
                 mix_weights = cell_encoder(rna_b, temperature=1.0)
 
                 # ── GRN + Encoder losses (both phases) ────────────────────────
-                l_mask = masked_reconstruction_loss1(
+                l_mask = masked_reconstruction_loss(
                     grn=grn, mix_weights=mix_weights,          # <-- pass pre-computed
                     rna_batch=rna_b, tf_batch=tf_b,
                     tf_indices_in_G=tf_indices_in_G.to(rna_b.device),
@@ -286,7 +270,7 @@ def run_training(data, model_config, train_config):
                 l_anchor  = (q_b * (torch.log(q_b + 1e-8) - torch.log(mix_weights + 1e-8))).sum(1).mean()
 
                 # LD loss: linear decoder reconstruction
-                h_batch  = cell_encoder.encoder(rna_b)        # (B, 64)
+                h_batch  = cell_encoder.encoder(rna_b)        # (B, LD_HIDDEN)
                 l_ld     = ld_decoder.reconstruction_loss(h_batch, rna_b)
                 l_ld_reg = ld_decoder.ld_regularization_loss(h_batch)
 
@@ -299,22 +283,20 @@ def run_training(data, model_config, train_config):
                 epoch_terms['ld'].append(float(l_ld.item()))
                 epoch_terms['ld_reg'].append(float(l_ld_reg.item()))
 
+                # same composition in both phases, only the weight set differs
+                loss_grn = (W["MASK"]        * l_mask        +
+                            W["SPARSE"]      * l_sparse      +
+                            W["ACCESS"]      * l_access      +
+                            W["ACCESS_GENE"] * l_access_gene +
+                            W["DIVERSE"]     * l_diverse     +
+                            W["ANCHOR"] * anchor_scale * l_anchor +
+                            W["LD"]          * l_ld          +
+                            W["LD_REG"]      * l_ld_reg)
+
                 if phase == 1:
-                    loss_grn = (W1_MASK    * l_mask    +
-                                W1_SPARSE  * l_sparse  +
-                                W1_ACCESS  * l_access  +
-                                W1_ACCESS_GENE * l_access_gene +
-                                W1_DIVERSE * l_diverse +
-                                W1['ANCHOR'] * anchor_scale * l_anchor +
-                                W1_LD      * l_ld      +
-                                W1_LD_REG  * l_ld_reg)
-                
                     opt_grn.zero_grad()
                     loss_grn.backward()
-                    torch.nn.utils.clip_grad_norm_(
-                        list(grn.parameters()) + list(cell_encoder.parameters()) +
-                        list(ld_decoder.parameters()), 1.0
-                    )
+                    torch.nn.utils.clip_grad_norm_(grn_params, CLIP_NORM)
                     opt_grn.step()
                     epoch_losses.append(float(loss_grn.item()))
 
@@ -331,49 +313,29 @@ def run_training(data, model_config, train_config):
                     chrom_lead = lead_t[batch_idx]                       # (B, G)
                     tf_lead    = chrom_lead[:, tf_indices_in_G]          # (B, T)
                     prod       = grn.production_from_lead(tf_lead, mix_weights.detach(),
-                                                           prune_frac=train_config["GRN_PRUNE_FRAC"])  # (B, G)
-                    disequil   = chrom_lead + train_config["LAMBDA_GRN"] * prod
+                                                           prune_frac=GRN_PRUNE_FRAC)  # (B, G)
+                    disequil   = chrom_lead + LAMBDA_GRN * prod
 
                     # Velocity forward — pass disequil directly, no encoder re-call
                     velocity = vel_head(rna_b, disequil)                     # (B, G)
 
                     l_vel    = velocity_consistency_loss(velocity, disequil.detach())
 
-                    if USE_LOCAL_ATAC:
-                        ga_batch = gene_access_t if gene_access_t.dim() == 1 else gene_access_t[batch_idx]
-                        l_atac   = atac_direction_loss(velocity, ga_batch)
-                    else:
-                        l_atac   = atac_direction_loss(velocity, gene_access_t)
-
-                    #l_dense  = density_gradient_loss(velocity, batch_idx, V_dec2)
-                    #l_div    = divergence_loss(velocity, batch_idx, rna_b, neighbor_indices_t, X_t)
+                    l_atac   = atac_direction_loss(velocity, gene_access_t[batch_idx])
 
                     epoch_terms['vel'].append(float(l_vel.item()))
                     epoch_terms['atac'].append(float(l_atac.item()))
                     epoch_terms['disequil_norm'].append(float(disequil.norm(dim=1).mean().item()))
                     epoch_terms['velocity_norm'].append(float(velocity.norm(dim=1).mean().item()))
 
-                    loss_vel = (W2_VEL    * l_vel    +
-                                W2_ATAC   * l_atac   )
-
-                    loss_grn = (W2_MASK    * l_mask    +
-                                W2_SPARSE  * l_sparse  +
-                                W2_ACCESS  * l_access  +
-                                W2_ACCESS_GENE * l_access_gene +
-                                W2_DIVERSE * l_diverse +
-                                W2['ANCHOR'] * anchor_scale * l_anchor +
-                                W2_LD      * l_ld      +
-                                W2_LD_REG  * l_ld_reg)
+                    loss_vel = W["VEL"] * l_vel + W["ATAC"] * l_atac
 
                     opt_grn.zero_grad()
                     opt_vel.zero_grad()
                     loss_grn.backward(retain_graph=True)
                     loss_vel.backward()
-                    torch.nn.utils.clip_grad_norm_(
-                        list(grn.parameters()) + list(cell_encoder.parameters()) +
-                        list(ld_decoder.parameters()), 1.0
-                    )
-                    torch.nn.utils.clip_grad_norm_(vel_head.parameters(), 1.0)
+                    torch.nn.utils.clip_grad_norm_(grn_params, CLIP_NORM)
+                    torch.nn.utils.clip_grad_norm_(vel_head.parameters(), CLIP_NORM)
                     opt_grn.step()
                     opt_vel.step()
                     epoch_losses.append(float((loss_grn + loss_vel).item()))
@@ -393,9 +355,8 @@ def run_training(data, model_config, train_config):
                 grn.eval(); vel_head.eval(); cell_encoder.eval()
                 with torch.no_grad():
                     mw_snap  = cell_encoder(X_t, temperature=1.0)
-                    tf_lead_all = lead_t[:, tf_indices_in_G]
-                    diseq_snap = lead_t + train_config["LAMBDA_GRN"] * grn.production_from_lead(
-                        tf_lead_all, mw_snap, prune_frac=train_config["GRN_PRUNE_FRAC"])
+                    diseq_snap = lead_t + LAMBDA_GRN * grn.production_from_lead(
+                        tf_lead_all, mw_snap, prune_frac=GRN_PRUNE_FRAC)
                     V_snap   = vel_head(X_t, diseq_snap).numpy()
                 # X_full passed here MUST be in the same z-scored space as the velocity
                 # (rna_z) — passing raw X silently reweights every gene by its own
@@ -408,9 +369,8 @@ def run_training(data, model_config, train_config):
         grn.eval(); vel_head.eval(); cell_encoder.eval()
         with torch.no_grad():
             full_weights = cell_encoder(X_t, temperature=1.0)
-            tf_lead_all = lead_t[:, tf_indices_in_G]
-            disequil_full = lead_t + train_config["LAMBDA_GRN"] * grn.production_from_lead(
-                tf_lead_all, full_weights, prune_frac=train_config["GRN_PRUNE_FRAC"])
+            disequil_full = lead_t + LAMBDA_GRN * grn.production_from_lead(
+                tf_lead_all, full_weights, prune_frac=GRN_PRUNE_FRAC)
             V_pred       = vel_head(X_t, disequil_full).cpu().numpy()
             steady_full = grn.predict_rna(X_TF_t, full_weights).cpu().numpy()
             A_dict_np    = grn.A_dict.cpu().numpy()
@@ -419,7 +379,7 @@ def run_training(data, model_config, train_config):
             A_learned = grn.effective_A(w_mean).cpu().numpy()           # (G, T) population GRN
             all_mix_weights = full_weights.cpu().numpy()
 
-            h_full   = cell_encoder.encoder(X_t)           # (C, 64)
+            h_full   = cell_encoder.encoder(X_t)           # (C, LD_HIDDEN)
             z_2d_full, _ = ld_decoder.forward(h_full)
             z_2d_np  = z_2d_full.cpu().numpy()
             gene_loadings = ld_decoder.get_gene_loadings()  # (G, 2)
@@ -459,6 +419,7 @@ def run_training(data, model_config, train_config):
             plot_velocity_stream(V_dec2, V_stream_2d, pseudo_norm,
                                   save_path=f"{d}/velocity_stream.png")
 
+        last_dir = target_dirs[-1]   # where the post-loop LD biplot is written
         print(f"Run {run_i} complete. Outputs saved to: {', '.join(target_dirs)}")
 
     with torch.no_grad():
@@ -495,10 +456,9 @@ def run_training(data, model_config, train_config):
             A_genes     = A_genes,
             z_2d_atac   = z_atac_plot,
             highlight_genes = ['CD34', 'MPO', 'LYZ', 'GATA1', 'SPI1', 'CEBPA'],
-            save_path   = f"{d}/ld_embedding_biplot.png"
+            save_path   = f"{last_dir}/ld_embedding_biplot.png"
         )
-        
-        
+
         print(f"RNA z_2d std per dim: {z_rna.std(axis=0).round(3)}")
         print(f"ATAC z_2d std per dim: {z_atac.std(axis=0).round(3)}")
         print("If stds are similar, both dims are active. If one is near 0, collapse persists.")
