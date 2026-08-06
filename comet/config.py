@@ -59,9 +59,9 @@ MODEL = {
 
 TRAIN = {
     "NUM_RUNS": 1,
-    "N_EPOCHS": 120,
-    "PHASE1_EPOCHS": 40,
-    "BATCH_SIZE": 512,
+    "N_EPOCHS": 120, #120
+    "PHASE1_EPOCHS": 120, #40
+    "BATCH_SIZE": 128, #512
     "N_TOP_HVG": 3000,
     "LR_GRN": 5e-4,
     "LR_VEL": 2e-4,
@@ -84,11 +84,12 @@ TRAIN = {
     "WEIGHTS_PHASE1": {
         "MASK": 2.0,
         "SPARSE": 5e-3,
-        "ACCESS": 0.1,
-        "DIVERSE": 10.0,
+        "ACCESS": 1.0, #.1
+        "ACCESS_GENE": 1.0, #.1
+        "DIVERSE": 0, #10.0, 5
         "ANCHOR": 1.0,
-        "LD": 0.5,
-        "LD_REG": 0.1,
+        "LD": 0, #.5
+        "LD_REG": 0, #.1
     },
 
     "WEIGHTS_PHASE2": {
@@ -96,7 +97,8 @@ TRAIN = {
         "VEL": 3.0,
         "ATAC": 1.0,
         "SPARSE": 5e-3,
-        "ACCESS": 0.1,
+        "ACCESS": .1,
+        "ACCESS_GENE": .1,
         "DIVERSE": 5.0,
         "ANCHOR": 0.5,
         "LD": 0.3,
@@ -108,6 +110,6 @@ TRAIN = {
         "ETA_MIN": 1e-5
     },
 
-    "OUTPUT_DIR": "/home/elicanter/nestorowa_test_output",
+    "OUTPUT_DIR": "/home/elicanter/nestorowa_newtest",
 
 }

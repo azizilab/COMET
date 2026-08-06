@@ -19,7 +19,23 @@ from torch.utils.data import TensorDataset, DataLoader, RandomSampler
 def run_training(data, model_config, train_config):
 
     X = data["X"] # normalised scRNA-seq expression matrix (C x G)
-    X_TF = data["X_TF"] # TF-expression sub-matrix (C x T)
+    X_TF_raw = data["X_TF"] # TF-expression sub-matrix (C x T), raw normalised units
+
+    # ── standardise the TF inputs ────────────────────────────────────────────
+    # predict_rna is X_TF @ A.T with no intercept, so a weight is "RNA per unit of
+    # TF expression". In raw units that makes |A[:, t]| scale like 1/expression(t):
+    # a highly expressed TF needs a SMALL weight to reach a given target level and
+    # a barely expressed one needs a LARGE weight. Ranking edges by |A| therefore
+    # ranks TFs roughly in reverse order of how active they are — measured on the
+    # mHSC-E run, Spearman(per-TF mean |A|, TF expression) = -0.73, which put edge
+    # recovery *below* random because well-expressed TFs are exactly the hubs of
+    # the ChIP references.
+    #
+    # Dividing each TF column by its own SD makes a weight "RNA per SD of TF", i.e.
+    # a standardised coefficient, which is unit-free and directly comparable across
+    # TFs. A_learned is saved in those units, so downstream edge rankings are
+    # comparable without any post-hoc rescaling.
+    X_TF = (X_TF_raw - X_TF_raw.mean(axis=0)) / (X_TF_raw.std(axis=0) + 1e-8)
 
     M = data["M"] # binary motif mask (G x T), M_gt=1 iff TF t has a binding motif in a peak linked to gene g
 
@@ -114,9 +130,14 @@ def run_training(data, model_config, train_config):
     
     dataset = TensorDataset(X_t, X_TF_t, cell_idx_t)
     
+    # drop_last=False: with 1071 cells the old drop_last=True discarded the ragged
+    # tail every epoch (47 cells at batch 128, 47 at batch 512) and, more to the
+    # point, cost whole optimizer steps — at batch 512 it left only 2 steps per
+    # epoch, 240 over a 120-epoch run. Every loss term here is batch-size agnostic,
+    # so a short final batch is safe.
     loader = DataLoader(dataset, batch_size=BATCH_SIZE,
                         sampler=RandomSampler(dataset, replacement=False),
-                        drop_last=True)
+                        drop_last=False)
     
     W1 = train_config["WEIGHTS_PHASE1"]
     W2 = train_config["WEIGHTS_PHASE2"]
@@ -125,6 +146,7 @@ def run_training(data, model_config, train_config):
     W1_MASK    = W1["MASK"]
     W1_SPARSE  = W1["SPARSE"]
     W1_ACCESS  = W1["ACCESS"]
+    W1_ACCESS_GENE = W1["ACCESS_GENE"]
     W1_DIVERSE = W1["DIVERSE"] # HIGH — forces atoms apart from the start
     W1_LD      = W1["LD"] # reconstruction weight — raised 10×
     W1_LD_REG  = W1["LD_REG"] # orthogonality + variance regulariser
@@ -135,6 +157,7 @@ def run_training(data, model_config, train_config):
     W2_ATAC    = W2["ATAC"]
     W2_SPARSE  = W2["SPARSE"]
     W2_ACCESS  = W2["ACCESS"]
+    W2_ACCESS_GENE = W2["ACCESS_GENE"]
     W2_DIVERSE = W2["DIVERSE"]
     W2_LD      = W2["LD"]
     W2_LD_REG  = W2["LD_REG"]
@@ -170,7 +193,14 @@ def run_training(data, model_config, train_config):
         # ── model construction ────────────────────────────────────────────────
         grn = GRNDictionary(G=G, T=T, M=M, D=D_ATOMS)
         grn.TF_access = TF_access_t.clone()
-        grn.mean_tf = torch.tensor(X_TF.mean(axis=0), dtype=torch.float32)
+        grn.Gene_access = torch.tensor(gene_access, dtype=torch.float32)
+        # Representative TF input for diversity_loss's prediction-space term, which
+        # evaluates each atom on it and penalises atoms whose OUTPUTS agree. Now that
+        # X_TF is standardised its column mean is 0 by construction, and feeding that
+        # in would make every atom predict ~0 and the term vanish silently. Mean
+        # absolute deviation keeps a per-TF, positive, typical-magnitude input in the
+        # same units the model now consumes.
+        grn.mean_tf = torch.tensor(np.abs(X_TF).mean(axis=0), dtype=torch.float32)
     
         cell_encoder = CellStateEncoder(G=G, D=D_ATOMS)
     
@@ -250,6 +280,7 @@ def run_training(data, model_config, train_config):
                 )
                 l_sparse  = grn.sparsity_loss()
                 l_access  = grn.tf_access_consistency_loss()
+                l_access_gene = grn.gene_access_consistency_loss()
                 l_diverse = grn.diversity_loss()
                 q_b       = q_t[batch_idx]
                 l_anchor  = (q_b * (torch.log(q_b + 1e-8) - torch.log(mix_weights + 1e-8))).sum(1).mean()
@@ -262,6 +293,7 @@ def run_training(data, model_config, train_config):
                 epoch_terms['mask'].append(float(l_mask.item()))
                 epoch_terms['sparse'].append(float(l_sparse.item()))
                 epoch_terms['access'].append(float(l_access.item()))
+                epoch_terms['access_gene'].append(float(l_access_gene.item()))
                 epoch_terms['diverse'].append(float(l_diverse.item()))
                 epoch_terms['anchor'].append(float(l_anchor.item()))
                 epoch_terms['ld'].append(float(l_ld.item()))
@@ -271,6 +303,7 @@ def run_training(data, model_config, train_config):
                     loss_grn = (W1_MASK    * l_mask    +
                                 W1_SPARSE  * l_sparse  +
                                 W1_ACCESS  * l_access  +
+                                W1_ACCESS_GENE * l_access_gene +
                                 W1_DIVERSE * l_diverse +
                                 W1['ANCHOR'] * anchor_scale * l_anchor +
                                 W1_LD      * l_ld      +
@@ -326,6 +359,7 @@ def run_training(data, model_config, train_config):
                     loss_grn = (W2_MASK    * l_mask    +
                                 W2_SPARSE  * l_sparse  +
                                 W2_ACCESS  * l_access  +
+                                W2_ACCESS_GENE * l_access_gene +
                                 W2_DIVERSE * l_diverse +
                                 W2['ANCHOR'] * anchor_scale * l_anchor +
                                 W2_LD      * l_ld      +

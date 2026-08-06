@@ -110,6 +110,7 @@ class GRNDictionary(nn.Module):
         self.W_base = nn.Parameter(torch.zeros(G, T))      # shared base
         self.register_buffer("M", torch.tensor(M, dtype=torch.float32))
         self.register_buffer("TF_access", torch.zeros(T))
+        self.register_buffer("Gene_access", torch.zeros(G))
         self.register_buffer("mean_tf",  torch.zeros(T))
 
     def init_from_atoms(self, W_init):
@@ -208,7 +209,19 @@ class GRNDictionary(nn.Module):
 
     def tf_access_consistency_loss(self):
         closed = 1.0 - self.TF_access.clamp(0, 1)
-        return (torch.abs(self.A_dict) * closed.unsqueeze(0).unsqueeze(0)).mean()
+        dict_term = (torch.abs(self.A_dict) * closed.unsqueeze(0).unsqueeze(0)).mean()
+        base_term = (torch.abs(self.A_base) * closed).mean()
+        return dict_term + base_term
+
+    def gene_access_consistency_loss(self):
+        """Same idea as tf_access_consistency_loss, but gates by the TARGET
+        gene's own chromatin accessibility instead of the regulating TF's --
+        an independent term (not multiplied with the TF-side one), scaling
+        whole rows rather than whole columns."""
+        closed = 1.0 - self.Gene_access.clamp(0, 1)
+        dict_term = (torch.abs(self.A_dict) * closed.view(1, -1, 1)).mean()
+        base_term = (torch.abs(self.A_base) * closed.unsqueeze(1)).mean()
+        return dict_term + base_term
 
 
 def init_atoms_from_soft_targets(X, q, M, A_tfs):

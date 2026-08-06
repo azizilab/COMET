@@ -3,7 +3,7 @@ import numpy as np
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize as sk_normalize
-import pyranges as pr
+#import pyranges as pr
 
 
 def project_to_2d(V_pred_full, X_2d_vis, X_full, search_space=None, k=30, scale=1.0,
