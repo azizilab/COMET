@@ -1,3 +1,1 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:207df1996c32829a237f38274d4f2a761db1925ee43cd30dfdcb32ff08dac7e3
-size 393
+paul2015data_clean/atac_matrix.trimmed.mtx.gz filter=lfs diff=lfs merge=lfs -text
