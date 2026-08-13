@@ -10,7 +10,7 @@ from config import (
     D_ATOMS, N_EPOCHS, PHASE1_EPOCHS, BATCH_SIZE, GEO_TAU_SCALE, LAMBDA_GRN,
     TARGET_CELLS_PER_EPOCH, FORCE_RERUN, ENTROPY_ROOT_TRUST, COMMIT_LOSS_W,
     COMMIT_W_SCALE, STATE_SPACE, VEL_MOMENT_KNN, SMOOTH_VELOCITY, BETA_PERP,
-    K_MOMENT, RANDOM_STATE, W1, W2, GRN_PRUNE_FRAC,
+    K_MOMENT, RANDOM_STATE, W1, W2, GRN_PRUNE_FRAC, LD_HIDDEN, LR_GRN, LR_VEL,
 )
 from utils.common import zscore_cols
 from utils.committor import moment_operator, committor_field, committor_gene_direction
@@ -114,11 +114,18 @@ def run_comet(b, out_dir):
     grn.mean_tf = torch.tensor(b.X_TF.mean(0), dtype=torch.float32)
     grn.init_from_atoms(init_atoms_from_soft_targets(b.X, q_target, b.M, b.A_tfs))
     cell_encoder = CellStateEncoder(G=G, D=D_ATOMS); cell_encoder.init_from_soft_targets(b.X, q_target, n_epochs=40)
-    vel_head = DictVelocityHead(G=G); ld_decoder = LinearDecoder(hidden=64, G=G, ld_dim=2)
+    vel_head = DictVelocityHead(G=G)
+    # LinearDecoder consumes the encoder's hidden output directly, so LD_HIDDEN is not free --
+    # it has to match cell_encoder.h_out (the encoder's hidden // 2).
+    assert LD_HIDDEN == cell_encoder.h_out, (
+        f"config.LD_HIDDEN={LD_HIDDEN} must equal the encoder's output width "
+        f"({cell_encoder.h_out})"
+    )
+    ld_decoder = LinearDecoder(hidden=LD_HIDDEN, G=G, ld_dim=2)
 
     opt_grn = torch.optim.AdamW(
-        list(grn.parameters()) + list(cell_encoder.parameters()) + list(ld_decoder.parameters()), lr=5e-4)
-    opt_vel = torch.optim.AdamW(vel_head.parameters(), lr=2e-4)
+        list(grn.parameters()) + list(cell_encoder.parameters()) + list(ld_decoder.parameters()), lr=LR_GRN)
+    opt_vel = torch.optim.AdamW(vel_head.parameters(), lr=LR_VEL)
     sch_grn = torch.optim.lr_scheduler.CosineAnnealingLR(opt_grn, T_max=N_EPOCHS, eta_min=1e-5)
     sch_vel = torch.optim.lr_scheduler.CosineAnnealingLR(opt_vel, T_max=N_EPOCHS - PHASE1_EPOCHS, eta_min=1e-5)
 

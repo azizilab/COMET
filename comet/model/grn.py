@@ -122,7 +122,9 @@ class GRNDictionary(nn.Module):
 
     def tf_access_consistency_loss(self):
         closed = 1.0 - self.TF_access.clamp(0, 1)
-        return (torch.abs(self.A_dict) * closed.unsqueeze(0).unsqueeze(0)).mean()
+        dict_term = (torch.abs(self.A_dict) * closed.unsqueeze(0).unsqueeze(0)).mean()
+        base_term = (torch.abs(self.A_base) * closed).mean()
+        return dict_term + base_term
 
     def gene_access_consistency_loss(self):
         """Same idea as tf_access_consistency_loss, but gates by the TARGET gene's own

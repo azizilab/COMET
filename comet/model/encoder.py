@@ -14,6 +14,7 @@ class CellStateEncoder(nn.Module):
             nn.Linear(G, hidden), nn.LayerNorm(hidden), nn.GELU(),
             nn.Linear(hidden, hidden // 2), nn.GELU())
         self.head = nn.Linear(hidden // 2, D); self.D = D
+        self.h_out = hidden // 2   # width of self.encoder's output, consumed by LinearDecoder
 
     def init_from_soft_targets(self, X, q, n_epochs=40, lr=1e-3, batch=256):
         print("  Pre-training encoder to match geometric soft targets...")

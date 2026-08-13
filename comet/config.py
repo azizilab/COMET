@@ -34,6 +34,10 @@ PHASE1_EPOCHS = 40
 BATCH_SIZE    = 512
 GEO_TAU_SCALE = 0.5      # smaller -> sharper geometric mixing targets (less mixing)
 LAMBDA_GRN    = 1.0      # weight of GRN-propagated lead inside the velocity disequilibrium
+LD_HIDDEN     = 64       # width of the linear decoder's input; must equal the cell encoder's
+                         # hidden output (CellStateEncoder.h_out), asserted in training_loop.py
+LR_GRN        = 5e-4     # AdamW lr for grn + cell_encoder + ld_decoder (opt_grn)
+LR_VEL        = 2e-4     # AdamW lr for vel_head (opt_vel)
 
 # trajectory inference (production_from_lead) propagates the TF lead through only the top
 # GRN_PRUNE_FRAC fraction (by |weight|, per module) of each GRN's edges -- ported from
@@ -126,5 +130,5 @@ W2 = dict(MASK=1.0, SPARSE=5e-3, ACCESS=0.1, ACCESS_GENE=0.1, DIVERSE=5.0, ANCHO
 
 MODEL = {
     "D_ATOMS": D_ATOMS,
-    "LD_HIDDEN": 64,
+    "LD_HIDDEN": LD_HIDDEN,
 }
