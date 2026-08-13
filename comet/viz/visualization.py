@@ -8,9 +8,58 @@ import matplotlib.pyplot as plt
 from PIL import Image
 
 from sklearn.neighbors import NearestNeighbors
+from sklearn.decomposition import PCA
 from scipy.ndimage import gaussian_filter
 from scipy.spatial import cKDTree
- 
+
+from config import RANDOM_STATE
+from utils.common import zscore_cols
+from utils.committor import palette_for, scatter_types
+
+
+def clean_quiver(ax, V2D, emb, cts, title, pal=None, n_grid=22, root_mask=None):
+    pal = pal or palette_for(cts); scatter_types(ax, emb, cts, pal, s=12, alpha=0.30)
+    xmin, xmax = emb[:,0].min(), emb[:,0].max(); ymin, ymax = emb[:,1].min(), emb[:,1].max()
+    xs, ys = np.linspace(xmin, xmax, n_grid), np.linspace(ymin, ymax, n_grid); r = (xmax-xmin)/n_grid*1.2
+    gx, gy, gu, gv = [], [], [], []
+    for xi in xs:
+        for yi in ys:
+            near = (emb[:,0]-xi)**2 + (emb[:,1]-yi)**2 < r**2
+            if near.sum() > 3:
+                gx.append(xi); gy.append(yi); gu.append(V2D[near,0].mean()); gv.append(V2D[near,1].mean())
+    u, v = np.array(gu), np.array(gv); sp_ = np.sqrt(u**2 + v**2) + 1e-8
+    ax.quiver(gx, gy, u/sp_, v/sp_, sp_, cmap='magma', scale=28, width=0.006, headwidth=4, zorder=4)
+    if root_mask is not None and root_mask.any():
+        rc = emb[root_mask].mean(0); ax.scatter(*rc, marker="*", s=420, c="lime", edgecolors="k", zorder=6)
+    ax.set_title(title, fontsize=10, fontweight='bold'); ax.set_xticks([]); ax.set_yticks([])
+
+
+def make_embeddings(b, seed=RANDOM_STATE, wanted=None):
+    """Display embeddings: {name: (emb2d, kNN_source_space)}. These are DISPLAY projections only —
+    the same gene-space velocity is projected onto each; they do not change the trajectory.
+    `wanted` (a set/list of names) restricts which are built so UMAP isn't computed if unused.
+    decipher2d + pca2d are always available; the UMAP variants require `umap` (skipped if absent)."""
+    want = None if wanted is None else set(wanted)
+    need = lambda n: (want is None) or (n in want)
+    E = {}
+    E["decipher2d"] = (b.V_dec2, b.Z_dec)
+    Xz = zscore_cols(b.X)
+    Xp = PCA(n_components=min(30, b.G - 1, b.N - 1), random_state=seed).fit_transform(Xz)
+    E["pca2d"] = (Xp[:, :2].astype(np.float32), Xp.astype(np.float32))
+    if need("umap_decipher") or need("umap_pca"):
+        try:
+            import umap
+            if need("umap_decipher"):
+                E["umap_decipher"] = (umap.UMAP(random_state=seed, n_neighbors=15, min_dist=0.3)
+                                      .fit_transform(b.Z_dec).astype(np.float32), b.Z_dec)
+            if need("umap_pca"):
+                E["umap_pca"]      = (umap.UMAP(random_state=seed, n_neighbors=15, min_dist=0.3)
+                                      .fit_transform(Xp).astype(np.float32), Xp.astype(np.float32))
+        except Exception as e:
+            print(f"  [umap unavailable, plotting decipher2d + pca2d only: {e}]")
+    return E
+
+
 class VelocityGIFMaker:
     def __init__(self, dpi=100, mode="Decipher"):
         self.dpi = dpi

@@ -1,417 +1,231 @@
-from model.encoder import CellStateEncoder
-from model.grn import GRNDictionary, initialize_grn_dictionary_from_clusters, masked_reconstruction_loss
-from model.velocity import DictVelocityHead, velocity_consistency_loss, atac_direction_loss, atac_direction_loss_asymmetric, velocity_smoothness_loss, density_gradient_loss, divergence_loss
-from model.ld_vae import LinearDecoder, plot_ld_embedding
-from utils.graph import build_neighbor_index
-from utils.geometry import project_to_2d, build_local_atac
-from viz.visualization import VelocityGIFMaker
-
 import os
 import numpy as np
-import torch
 
-from sklearn.preprocessing import StandardScaler
+import torch
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler
 
-def run_training(data, model_config, train_config):
+from sklearn.decomposition import PCA
 
-    X = data["X"] # normalised scRNA-seq expression matrix (C x G)
-    X_TF = data["X_TF"] # TF-expression sub-matrix (C x T)
-
-    M = data["M"] # binary motif mask (G x T), M_gt=1 iff TF t has a binding motif in a peak linked to gene g
-
-    gene_activity = data["gene_activity"] # per-cell local chromatin accessibility (C x G) 
-    gene_access = data["gene_access"] # population-mean chromatin accessibility for each gene (G,)
-    gene_access_t = data["gene_access_t"] # as tensor
-
-    TF_access_prior = data["TF_access_prior"] # population-mean chromatin accessibility for each TF locus (T,)
-    TF_access_t = torch.tensor(TF_access_prior, dtype=torch.float32)
-
-    # identity sets for genes and TFs (i.e. active "universe")
-    A_genes = data["A_genes"]
-    A_tfs = data["A_tfs"]
-
-    # index mappings
-    gene_idx = data["gene_idx"]
-    tf_idx = data["tf_idx"]
-    sub_g2i = data["sub_g2i"]
-
-    rna_adata = data["rna_adata"] # raw AnnData object for RNA, used for pseudotime and plotting only (not model input)
-
-    
-    # Run once before starting training
-    # Find the local index of each TF within the A_genes list
-    tf_indices_in_G = []
-    for tf_name in A_tfs:
-        if tf_name in sub_g2i:
-            tf_indices_in_G.append(sub_g2i[tf_name])
-        else:
-            # This shouldn't happen based on A_tfs filtering, but for safety:
-            tf_indices_in_G.append(-1) 
-
-    tf_indices_in_G = torch.tensor(tf_indices_in_G, dtype=torch.long)
+from config import (
+    D_ATOMS, N_EPOCHS, PHASE1_EPOCHS, BATCH_SIZE, GEO_TAU_SCALE, LAMBDA_GRN,
+    TARGET_CELLS_PER_EPOCH, FORCE_RERUN, ENTROPY_ROOT_TRUST, COMMIT_LOSS_W,
+    COMMIT_W_SCALE, STATE_SPACE, VEL_MOMENT_KNN, SMOOTH_VELOCITY, BETA_PERP,
+    K_MOMENT, RANDOM_STATE, W1, W2, GRN_PRUNE_FRAC,
+)
+from utils.common import zscore_cols
+from utils.committor import moment_operator, committor_field, committor_gene_direction
+from model.grn import GRNDictionary, select_archetypes_fps, geometric_soft_targets, init_atoms_from_soft_targets
+from model.encoder import CellStateEncoder
+from model.velocity import DictVelocityHead
+from model.ld_vae import LinearDecoder
+from losses.losses import (
+    masked_reconstruction_loss, velocity_consistency_loss, atac_direction_loss,
+    committor_consistency_loss, orient_disequilibrium,
+)
 
 
-    decipher_data = data["decipher_outputs"]
-    Z_dec   = decipher_data["z"].astype(np.float32)   # (C, 10)
-    V_dec2  = decipher_data["v"].astype(np.float32)   # (C, 2)
+def _load_cached_run(out_dir):
+    """Rebuild the results dict from a finished run's saved arrays (no model objects needed
+    downstream). Returns None if the run is incomplete."""
+    need = ["V_pred.npy", "mix_weights.npy", "A_learned.npy", "A_dict.npy",
+            "committor_q.npy", "root_mask.npy", "sink_mask.npy", "phi.npy"]
+    if not all(os.path.exists(os.path.join(out_dir, f)) for f in need):
+        return None
+    L = lambda f: np.load(os.path.join(out_dir, f))
+    return dict(V_pred=L("V_pred.npy"), mix=L("mix_weights.npy"), A_learned=L("A_learned.npy"),
+                A_dict=L("A_dict.npy"), q_commit=L("committor_q.npy"),
+                root_mask=L("root_mask.npy").astype(bool), sink_mask=L("sink_mask.npy").astype(bool),
+                phi=L("phi.npy"), grn=None, cell_encoder=None, vel_head=None)
 
-    USE_LOCAL_ATAC = train_config["USE_LOCAL_ATAC"]
 
-    if USE_LOCAL_ATAC:
-        # This assumes 'gene_activity' is your (C_atac, G) matrix
-        local_access, _ = build_local_atac(X, gene_activity, V_dec2, n_clusters=train_config["N_CLUSTERS"]) # number of GRN dictionary atoms)
-        gene_access_t = torch.tensor(local_access, dtype=torch.float32)
+def run_comet(b, out_dir):
+    """Train the full COMET model on one Bundle; save arrays; return a results dict."""
+    os.makedirs(out_dir, exist_ok=True)
+
+    # ---- resume: skip datasets that already finished ----
+    if not FORCE_RERUN:
+        cached = _load_cached_run(out_dir)
+        if cached is not None:
+            print(f"\n::: {b.name} ::: found finished run in {out_dir} -> loading & skipping training "
+                  f"(set FORCE_RERUN=True to retrain).")
+            return cached
+
+    trust    = float(ENTROPY_ROOT_TRUST.get(b.name, 1.0))
+    commit_w = COMMIT_LOSS_W * abs(trust) * float(COMMIT_W_SCALE.get(b.name, 1.0))
+    beta     = float(BETA_PERP.get(b.name, 0.5))
+
+    # ---- pick the LATENT STATE SPACE the trajectory is built in ----------------
+    # This is the only embedding choice that changes the gene-space velocity: committor graph,
+    # archetypes, geometric targets and the projection search space all live here.
+    space = STATE_SPACE.get(b.name, "decipher")
+    if space == "pca":
+        Zst = PCA(n_components=min(30, b.G - 1, b.N - 1),
+                  random_state=RANDOM_STATE).fit_transform(zscore_cols(b.X)).astype(np.float32)
     else:
-        # Fallback to your existing global vector (G,)
-        gene_access_t = torch.tensor(gene_access, dtype=torch.float32)
+        Zst = b.Z_dec
+    # first-moment denoiser in the state space (cleans the noisy per-cell ATAC lead; k larger for
+    # the paired ma2020 dataset). Built once and reused for the lead and the final velocity.
+    mknn  = int(VEL_MOMENT_KNN.get(b.name, K_MOMENT))
+    S_mom = moment_operator(Zst, mknn)
+    print(f"\n::: {b.name} :::  (entropy_trust={trust:+.2f}, beta_perp={beta:.2f}, "
+          f"state_space={space}, moment_knn={mknn}, committor_reinf_w={commit_w:.2f})")
 
+    # ---- shared lead signals + committor field (built once, in the state space) ----
+    # Pool the z-scored ATAC/RNA lead over state-space neighborhoods before differencing — this is
+    # the first-moment denoising that removes the per-cell jitter (the ma2020 messiness).
+    atac_z = np.asarray(S_mom @ zscore_cols(b.ga_matched), dtype=np.float32)
+    rna_z  = np.asarray(S_mom @ zscore_cols(b.X),          dtype=np.float32)
+    atac_z_t = torch.tensor(atac_z, dtype=torch.float32)
+    rna_z_t  = torch.tensor(rna_z,  dtype=torch.float32)
 
-    # --- SET NUMBER OF RUNS & PHASES HERE ---
-    NUM_RUNS = train_config["NUM_RUNS"]
-    N_EPOCHS = train_config["N_EPOCHS"]
-    PHASE1_EPOCHS = train_config["PHASE1_EPOCHS"] # GRN + encoder warmup (no velocity)
-    BATCH_SIZE = train_config["BATCH_SIZE"]
-    D_ATOMS = model_config["D_ATOMS"] # number of GRN dictionary atoms
-    # ----------------------------------------
-    
+    q_commit, root_mask, sink_mask, phi = committor_field(b, entropy_trust=trust, Z=Zst)
+    commit_dir, commit_valid = committor_gene_direction(b, q_commit, Z=Zst)
+    commit_dir_t = torch.tensor(commit_dir, dtype=torch.float32)
+    commit_valid_t = torch.tensor(commit_valid, dtype=torch.bool)
+    print(f"  committor: root={int(root_mask.sum())} cells, sinks={int(sink_mask.sum())}, "
+          f"valid-direction cells={int(commit_valid.sum())}/{b.N}")
 
-    # ── data prep ────────────────────────────────────────────────────────────
-    G = X.shape[1]
-    T = X_TF.shape[1]
-    
-    X_t        = torch.tensor(X,    dtype=torch.float32)
-    X_TF_t     = torch.tensor(X_TF, dtype=torch.float32)
-    cell_idx_t = torch.arange(X_t.size(0))
+    # ---- archetypes + geometric soft mixing targets (in the state space) ----
+    arch_idx = select_archetypes_fps(Zst, D_ATOMS, seed=0)
+    q_target = geometric_soft_targets(Zst, arch_idx, tau_scale=GEO_TAU_SCALE)
 
-    pseudo = rna_adata.obs["facs_pseudotime"].astype(np.float32)
-    pseudo_norm = (pseudo.values - pseudo.min()) / (np.ptp(pseudo.values) + 1e-8)
-    pseudo_norm_t = torch.tensor(pseudo_norm, dtype=torch.float32)
-    
+    # ---- ATAC accessibility priors ----
+    G, T = b.G, b.T
+    TF_access = np.zeros(T, np.float32)
+    for i, tf in enumerate(b.A_tfs):
+        if tf in b.sub_g2i: TF_access[i] = float(b.ga_matched[:, b.sub_g2i[tf]].mean())
+    lo, hi = TF_access.min(), TF_access.max(); TF_access = (TF_access - lo) / (hi - lo + 1e-8)
+    TF_access_t   = torch.tensor(TF_access, dtype=torch.float32)
+    gene_access_t = torch.tensor(b.gene_access, dtype=torch.float32)
+
+    # ---- tensors + loader ----
+    X_t    = torch.tensor(b.X,    dtype=torch.float32)
+    X_TF_t = torch.tensor(b.X_TF, dtype=torch.float32)
+    q_t    = torch.tensor(q_target, dtype=torch.float32)
+    cell_idx_t = torch.arange(b.N)
+    tf_indices_in_G = torch.tensor(b.tf_indices_in_G, dtype=torch.long)
     dataset = TensorDataset(X_t, X_TF_t, cell_idx_t)
-    neighbor_indices_t = build_neighbor_index(X, V_dec2, Z_dec, mode=train_config["NEIGHBOR_SPACE"])
-    
-    loader = DataLoader(dataset, batch_size=BATCH_SIZE,
-                        sampler=RandomSampler(dataset, replacement=False),
-                        drop_last=True)
-    
-    W1 = train_config["WEIGHTS_PHASE1"]
-    W2 = train_config["WEIGHTS_PHASE2"]
+    loader  = DataLoader(dataset, batch_size=BATCH_SIZE,
+                         sampler=RandomSampler(dataset, replacement=False), drop_last=True)
 
-    # ── loss weights (Phase 1: GRN + Encoder warmup) ─────────────────────────
-    W1_MASK    = W1["MASK"]
-    W1_SPARSE  = W1["SPARSE"]
-    W1_ACCESS  = W1["ACCESS"]
-    W1_DIVERSE = W1["DIVERSE"] # HIGH — forces atoms apart from the start
-    W1_ENTROPY = W1["ENTROPY"] # penalize uniform mixing weights
-    W1_DIRICH  = W1["DIRICH"]
-    W1_LD      = W1["LD"] # reconstruction weight — raised 10×
-    W1_LD_REG  = W1["LD_REG"] # orthogonality + variance regulariser
+    # ---- models ----
+    grn = GRNDictionary(G=G, T=T, M=b.M, D=D_ATOMS)
+    grn.TF_access = TF_access_t.clone(); grn.Gene_access = gene_access_t.clone()
+    grn.mean_tf = torch.tensor(b.X_TF.mean(0), dtype=torch.float32)
+    grn.init_from_atoms(init_atoms_from_soft_targets(b.X, q_target, b.M, b.A_tfs))
+    cell_encoder = CellStateEncoder(G=G, D=D_ATOMS); cell_encoder.init_from_soft_targets(b.X, q_target, n_epochs=40)
+    vel_head = DictVelocityHead(G=G); ld_decoder = LinearDecoder(hidden=64, G=G, ld_dim=2)
 
-    # ── loss weights (Phase 2: Joint) ────────────────────────────────────────
-    W2_MASK    = W2["MASK"]
-    W2_VEL     = W2["VEL"]
-    W2_ATAC    = W2["ATAC"]
-    W2_SPARSE  = W2["SPARSE"]
-    W2_ACCESS  = W2["ACCESS"]
-    W2_SMOOTH  = W2["SMOOTH"]
-    W2_DIVERSE = W2["DIVERSE"]
-    W2_ENTROPY = W2["ENTROPY"]
-    W2_DENSE   = W2["DENSE"]
-    W2_DIV     = W2["DIV"]
-    W2_SOURCE  = W2["SOURCE"]
-    W2_DIRICH  = W2["DIRICH"] # push low-pseudotime cells outward
-    W2_LD      = W2["LD"]
-    W2_LD_REG  = W2["LD_REG"]
-    
-    PLOT_EVERY = train_config["PLOT_EVERY"]
-    base_path = train_config["OUTPUT_DIR"]  # Defined here so the check can use it
-    os.makedirs(base_path, exist_ok=True)
+    opt_grn = torch.optim.AdamW(
+        list(grn.parameters()) + list(cell_encoder.parameters()) + list(ld_decoder.parameters()), lr=5e-4)
+    opt_vel = torch.optim.AdamW(vel_head.parameters(), lr=2e-4)
+    sch_grn = torch.optim.lr_scheduler.CosineAnnealingLR(opt_grn, T_max=N_EPOCHS, eta_min=1e-5)
+    sch_vel = torch.optim.lr_scheduler.CosineAnnealingLR(opt_vel, T_max=N_EPOCHS - PHASE1_EPOCHS, eta_min=1e-5)
 
-    for run_i in range(NUM_RUNS):
-        # ── CHECK IF RUN ALREADY EXISTS ────────────────────────────────────────
-        if run_i == 0:
-            # Run 0 could exist directly in the main folder (if previously run with NUM_RUNS=1)
-            # or inside its own subfolder 'run0'
-            exists_in_main = os.path.exists(os.path.join(base_path, "V_pred.npy"))
-            exists_in_sub  = os.path.exists(os.path.join(base_path, "run0", "V_pred.npy"))
-            run_exists = exists_in_main or exists_in_sub
-        else:
-            # Runs 1, 2, 3+ will always be in their respective subfolders
-            run_exists = os.path.exists(os.path.join(base_path, f"run{run_i}", "V_pred.npy"))
+    # cap minibatches/epoch so per-epoch cost is independent of #cells (unbiased SGD subsampling)
+    n_batches = len(loader)
+    steps_per_epoch = n_batches if TARGET_CELLS_PER_EPOCH is None \
+        else max(1, min(n_batches, int(np.ceil(TARGET_CELLS_PER_EPOCH / BATCH_SIZE))))
+    print(f"  {n_batches} batches/epoch available; using {steps_per_epoch}/epoch "
+          f"({steps_per_epoch*BATCH_SIZE} cells/epoch of {b.N}).")
 
-        if run_exists:
-            print(f"\n::: Run {run_i} already exists. Skipping... :::")
-            # Set 'd' as a fallback so the plotting code at the very end doesn't throw a NameError
-            d = os.path.join(base_path, f"run{run_i}") if run_i > 0 else base_path
-            continue
-        # ───────────────────────────────────────────────────────────────────────
+    loss_history = []
+    for epoch in range(N_EPOCHS):
+        phase = 1 if epoch < PHASE1_EPOCHS else 2
+        if epoch == PHASE1_EPOCHS: print("  -- Phase 2 (joint velocity + committor) --")
+        anchor_scale = max(0.2, 1.0 - 0.8 * epoch / N_EPOCHS)
+        grn.train(); cell_encoder.train(); vel_head.train(phase == 2)
+        for p in vel_head.parameters(): p.requires_grad_(phase == 2)
 
-        print(f"\n::: Starting Run {run_i} :::")
-        print(f"Phase 1: GRN+Encoder warmup for {PHASE1_EPOCHS} epochs")
-        print(f"Phase 2: Joint training for {N_EPOCHS - PHASE1_EPOCHS} epochs")
-    
+        epoch_losses = []
+        for step, (rna_b, tf_b, bidx) in enumerate(loader):
+            if step >= steps_per_epoch: break                  # fresh random subset each epoch
+            mix = cell_encoder(rna_b, temperature=1.0)
+            l_mask    = masked_reconstruction_loss(grn, mix, rna_b, tf_b, tf_indices_in_G, 0.40)
+            l_sparse  = grn.sparsity_loss(); l_access = grn.tf_access_consistency_loss()
+            l_access_gene = grn.gene_access_consistency_loss()
+            l_diverse = grn.diversity_loss()
+            q_b       = q_t[bidx]
+            l_anchor  = (q_b * (torch.log(q_b + 1e-8) - torch.log(mix + 1e-8))).sum(1).mean()
+            h_b       = cell_encoder.encoder(rna_b)
+            l_ld      = ld_decoder.reconstruction_loss(h_b, rna_b)
+            l_ld_reg  = ld_decoder.ld_regularization_loss(h_b)
 
-        # ── model construction ────────────────────────────────────────────────
-        grn = GRNDictionary(G=G, T=T, M=M, D=D_ATOMS)
-        grn.TF_access = TF_access_t.clone()
-        grn.mean_tf = torch.tensor(X_TF.mean(axis=0), dtype=torch.float32)
-    
-        cell_encoder = CellStateEncoder(G=G, D=D_ATOMS)
-    
-        vel_head = DictVelocityHead(G=G)
-        # Linear decoder for interpretable 2D embedding
-        ld_decoder = LinearDecoder(hidden=64, G=G, ld_dim=2)
-
-        # ── cluster-based initialization ──────────────────────────────────────
-        # Initialize GRN atoms from cluster LFC profiles
-        cluster_labels, W_init = initialize_grn_dictionary_from_clusters(
-            X=X, V_dec2=V_dec2, M=M, D=D_ATOMS, A_tfs=A_tfs, sub_g2i=sub_g2i
-        )
-        grn.init_from_clusters(W_init)
-    
-        # Pre-train encoder to recognize clusters
-        cell_encoder.init_from_cluster_labels(X, cluster_labels, n_epochs=20)
-    
-        # ── optimizers ────────────────────────────────────────────────────────
-        opt_grn = torch.optim.AdamW(
-            list(grn.parameters()) + 
-            list(cell_encoder.parameters()) + 
-            list(ld_decoder.parameters()),
-            lr=train_config["LR_GRN"]
-        )
-        
-        opt_vel = torch.optim.AdamW(vel_head.parameters(), lr=train_config["LR_VEL"])
-    
-        sch_grn = torch.optim.lr_scheduler.CosineAnnealingLR(
-            opt_grn, T_max=N_EPOCHS, eta_min=train_config["LR_SCHED"]["ETA_MIN"]
-        )
-        sch_vel = torch.optim.lr_scheduler.CosineAnnealingLR(
-            opt_vel, T_max=N_EPOCHS - PHASE1_EPOCHS, eta_min=train_config["LR_SCHED"]["ETA_MIN"]
-        )
-    
-        gif_maker = VelocityGIFMaker(dpi=100)
-        loss_history = []
-    
-        for epoch in range(N_EPOCHS):
-            phase = 1 if epoch < PHASE1_EPOCHS else 2
-    
-            if epoch == PHASE1_EPOCHS:
-                print(f"\n── Switching to Phase 2 (joint training) ──")
-    
-            # Temperature annealing: start broad (0.5), get sharp (0.1) over training
-            temperature = max(0.1, 0.5 - 0.4 * epoch / N_EPOCHS)
-    
-            grn.train(); cell_encoder.train()
             if phase == 1:
-                vel_head.eval()
-                for p in vel_head.parameters(): p.requires_grad_(False)
+                loss_grn = (W1['MASK']*l_mask + W1['SPARSE']*l_sparse + W1['ACCESS']*l_access +
+                            W1['ACCESS_GENE']*l_access_gene +
+                            W1['DIVERSE']*l_diverse + W1['ANCHOR']*anchor_scale*l_anchor +
+                            W1['LD']*l_ld + W1['LD_REG']*l_ld_reg)
+                opt_grn.zero_grad(); loss_grn.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    list(grn.parameters()) + list(cell_encoder.parameters()) + list(ld_decoder.parameters()), 1.0)
+                opt_grn.step(); epoch_losses.append(float(loss_grn.item()))
             else:
-                vel_head.train()
-                for p in vel_head.parameters(): p.requires_grad_(True)
-    
-            epoch_losses = []
-    
-            for rna_b, tf_b, batch_idx in loader:
-                # Compute mix_weights ONCE — shared by all loss terms
-                mix_weights = cell_encoder(rna_b, temperature=temperature)
+                # ATAC->RNA led disequilibrium (the gene program + per-cell magnitude)
+                az, rz     = atac_z_t[bidx], rna_z_t[bidx]
+                chrom_lead = az - rz
+                tf_lead    = az[:, tf_indices_in_G] - rz[:, tf_indices_in_G]
+                prod       = grn.production_from_lead(tf_lead, mix.detach(), prune_frac=GRN_PRUNE_FRAC)
+                disequil   = chrom_lead + LAMBDA_GRN * prod
+                # committor-orient it: lock the forward sign, keep GRN magnitude + orthogonal tilt.
+                # This is what the head sees, so the committor can actually steer the flow.
+                disequil_or = orient_disequilibrium(
+                    disequil, commit_dir_t[bidx], commit_valid_t[bidx], beta=beta)
+                velocity   = vel_head(rna_b, disequil_or)
 
-                # ── GRN + Encoder losses (both phases) ────────────────────────
-                l_mask = masked_reconstruction_loss(
-                    grn=grn, mix_weights=mix_weights,          # <-- pass pre-computed
-                    rna_batch=rna_b, tf_batch=tf_b,
-                    tf_indices_in_G=tf_indices_in_G.to(rna_b.device),
-                    mask_frac=0.40
-                )
-                l_sparse  = grn.sparsity_loss()
-                l_access  = grn.tf_access_consistency_loss()
-                l_diverse = grn.diversity_loss()
+                l_vel    = velocity_consistency_loss(velocity, disequil_or.detach())
+                ga_b     = gene_access_t if gene_access_t.dim() == 1 else gene_access_t[bidx]
+                l_atac   = atac_direction_loss(velocity, ga_b)
+                l_commit = committor_consistency_loss(velocity, commit_dir_t[bidx], commit_valid_t[bidx])
 
-                H = -torch.sum(mix_weights * torch.log(mix_weights + 1e-8), dim=-1).mean()
-                H_max = np.log(D_ATOMS)
-                l_entropy = H / H_max
+                loss_vel = W2['VEL']*l_vel + W2['ATAC']*l_atac + commit_w*l_commit
+                loss_grn = (W2['MASK']*l_mask + W2['SPARSE']*l_sparse + W2['ACCESS']*l_access +
+                            W2['ACCESS_GENE']*l_access_gene +
+                            W2['DIVERSE']*l_diverse + W2['ANCHOR']*anchor_scale*l_anchor +
+                            W2['LD']*l_ld + W2['LD_REG']*l_ld_reg)
 
-                if phase == 1:
-                    # LD loss: linear decoder reconstruction
-                    h_batch  = cell_encoder.encoder(rna_b)        # (B, 64)
-                    l_ld     = ld_decoder.reconstruction_loss(h_batch, rna_b)
-                    l_ld_reg = ld_decoder.ld_regularization_loss(h_batch)
-                
-                    loss_grn = (W1_MASK    * l_mask    +
-                                W1_SPARSE  * l_sparse  +
-                                W1_ACCESS  * l_access  +
-                                W1_DIVERSE * l_diverse +
-                                W1_ENTROPY * l_entropy +
-                                W1_LD      * l_ld      +
-                                W1_LD_REG  * l_ld_reg)
-                
-                    opt_grn.zero_grad()
-                    loss_grn.backward()
-                    torch.nn.utils.clip_grad_norm_(
-                        list(grn.parameters()) + list(cell_encoder.parameters()) +
-                        list(ld_decoder.parameters()), 1.0
-                    )
-                    opt_grn.step()
-                    epoch_losses.append(float(loss_grn.item()))
+                opt_grn.zero_grad(); opt_vel.zero_grad()
+                loss_grn.backward(retain_graph=True); loss_vel.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    list(grn.parameters()) + list(cell_encoder.parameters()) + list(ld_decoder.parameters()), 1.0)
+                torch.nn.utils.clip_grad_norm_(vel_head.parameters(), 1.0)
+                opt_grn.step(); opt_vel.step()
+                epoch_losses.append(float((loss_grn + loss_vel).item()))
 
-                else:  # phase 2
-                    # Pre-compute steady state and disequil ONCE
-                    steady   = grn.predict_rna(tf_b, mix_weights.detach())  # (B, G)
-                    disequil = steady - rna_b                                # (B, G)
+        sch_grn.step()
+        if phase == 2: sch_vel.step()
+        if epoch % 20 == 0 or epoch == N_EPOCHS - 1:
+            avg = float(np.mean(epoch_losses)); loss_history.append(avg)
+            print(f"  [P{phase}] epoch {epoch:03d}  loss={avg:.4f}  anchor_scale={anchor_scale:.2f}")
 
-                    # Velocity forward — pass disequil directly, no encoder re-call
-                    velocity = vel_head(rna_b, disequil)                     # (B, G)
-
-                    l_vel    = velocity_consistency_loss(velocity, rna_b, steady.detach())
-
-                    if USE_LOCAL_ATAC:
-                        ga_batch = gene_access_t[batch_idx]
-                        l_atac   = atac_direction_loss_asymmetric(velocity, ga_batch)
-                    else:
-                        l_atac   = atac_direction_loss(velocity, gene_access_t)
-
-                    l_smooth = velocity_smoothness_loss(velocity, batch_idx, neighbor_indices_t)
-                    l_dense  = density_gradient_loss(velocity, batch_idx, V_dec2)
-                    l_div    = divergence_loss(velocity, batch_idx, rna_b, neighbor_indices_t, X_t)
-                    l_source = 0
-
-                    h_batch  = cell_encoder.encoder(rna_b)        # (B, 64)
-                    l_ld     = ld_decoder.reconstruction_loss(h_batch, rna_b)
-                    l_ld_reg = ld_decoder.ld_regularization_loss(h_batch)
-
-                    loss_vel = (W2_VEL    * l_vel    +
-                                W2_ATAC   * l_atac   +
-                                W2_SMOOTH * l_smooth +
-                                W2_DENSE  * l_dense  +
-                                W2_DIV    * l_div    +
-                                W2_SOURCE * l_source)
-
-                    loss_grn = (W2_MASK    * l_mask    +
-                                W2_SPARSE  * l_sparse  +
-                                W2_ACCESS  * l_access  +
-                                W2_DIVERSE * l_diverse +
-                                W2_ENTROPY * l_entropy +
-                                W2_LD      * l_ld      +
-                                W2_LD_REG  * l_ld_reg)
-
-                    opt_grn.zero_grad()
-                    opt_vel.zero_grad()
-                    loss_grn.backward(retain_graph=True)
-                    loss_vel.backward()
-                    torch.nn.utils.clip_grad_norm_(
-                        list(grn.parameters()) + list(cell_encoder.parameters()) +
-                        list(ld_decoder.parameters()), 1.0
-                    )
-                    torch.nn.utils.clip_grad_norm_(vel_head.parameters(), 1.0)
-                    opt_grn.step()
-                    opt_vel.step()
-                    epoch_losses.append(float((loss_grn + loss_vel).item()))
-                    
-            sch_grn.step()
-            if phase == 2:
-                sch_vel.step()
-    
-            if epoch % 20 == 0 or epoch == N_EPOCHS - 1:
-                avg = np.mean(epoch_losses)
-                loss_history.append(avg)
-                print(f"  [P{phase}] Epoch {epoch:03d}  loss={avg:.4f}")
-    
-            if epoch % PLOT_EVERY == 0 or epoch == N_EPOCHS - 1:
-                grn.eval(); vel_head.eval(); cell_encoder.eval()
-                with torch.no_grad():
-                    mw_snap  = cell_encoder(X_t, temperature=0.1)
-                    ss_snap  = grn.predict_rna(X_TF_t, mw_snap)
-                    diseq_snap = ss_snap - X_t
-                    V_snap   = vel_head(X_t, diseq_snap).numpy()
-                V_snap_2d = project_to_2d(V_snap, V_dec2, X, k=12, scale=12.0)
-                gif_maker.add_frame(V_dec2, V_snap_2d, pseudo_norm, epoch)
-                grn.train(); vel_head.train(); cell_encoder.train()
-    
-        # ── Saving Outputs ────────────────────────────────────────────────────
-        grn.eval(); vel_head.eval(); cell_encoder.eval()
-        with torch.no_grad():
-            full_weights = cell_encoder(X_t, temperature=0.1)
-            steady_full  = grn.predict_rna(X_TF_t, full_weights)
-            diseq_full   = steady_full - X_t
-            V_pred       = vel_head(X_t, diseq_full).cpu().numpy()
-            A_dict_np    = grn.A_dict.cpu().numpy()
-            all_mix_weights = full_weights.cpu().numpy()
-            steady_full  = steady_full.cpu().numpy()
-            
-            h_full   = cell_encoder.encoder(X_t)           # (C, 64)
-            z_2d_full, _ = ld_decoder.forward(h_full)
-            z_2d_np  = z_2d_full.cpu().numpy()
-            gene_loadings = ld_decoder.get_gene_loadings()  # (G, 2)
-    
-        target_dirs = [base_path] if NUM_RUNS == 1 else [os.path.join(base_path, f"run{run_i}")]
-        if NUM_RUNS > 1 and run_i == 0:
-            target_dirs.append(base_path)
-    
-        for d in target_dirs:
-            os.makedirs(d, exist_ok=True)
-            np.save(f"{d}/V_pred.npy",        V_pred)
-            np.save(f"{d}/A_dict.npy",        A_dict_np)          # (D, G, T) atom bank
-            np.save(f"{d}/mix_weights.npy",   all_mix_weights)    # (C, D) per-cell
-            np.save(f"{d}/steady_state.npy",  steady_full)
-            np.save(f"{d}/A_genes.npy",       A_genes)
-            np.save(f"{d}/A_tfs.npy",         A_tfs)
-            np.save(f"{d}/gene_idx.npy",      gene_idx)
-            np.save(f"{d}/tf_idx.npy",        tf_idx)
-            np.save(f"{d}/loss_history.npy",  np.array(loss_history))
-            np.save(f"{d}/z_ld_2d.npy",      z_2d_np)
-            np.save(f"{d}/gene_loadings.npy", gene_loadings)
-            gif_maker.save(f"{d}/velocity_training.gif", fps=3)
-            gif_maker.save_slide_png(f"{d}/velocity_slide_final.png")
-            
-    
-        print(f"Run {run_i} complete. Outputs saved to: {', '.join(target_dirs)}")
-
+    # ---- inference + save ----
+    grn.eval(); vel_head.eval(); cell_encoder.eval()
     with torch.no_grad():
-        # --- RNA cells ---
-        h_rna = cell_encoder.encoder(X_t)           # (C_rna, 64)
-        z_rna, _ = ld_decoder(h_rna)
-        z_rna = z_rna.cpu().numpy()                  # (C_rna, 2)
+        mix_full      = cell_encoder(X_t, temperature=1.0)
+        az_all        = atac_z_t - rna_z_t
+        tf_lead_all   = az_all[:, tf_indices_in_G]
+        disequil_full = az_all + LAMBDA_GRN * grn.production_from_lead(tf_lead_all, mix_full, prune_frac=GRN_PRUNE_FRAC)
+        disequil_full = orient_disequilibrium(disequil_full, commit_dir_t, commit_valid_t, beta=beta)
+        V_pred        = vel_head(X_t, disequil_full).cpu().numpy()
+        steady_full   = grn.predict_rna(X_TF_t, mix_full).cpu().numpy()
+        A_dict_np     = grn.A_dict.cpu().numpy(); A_base_np = grn.A_base.cpu().numpy()
+        A_learned     = grn.effective_A(mix_full.mean(0)).cpu().numpy()
+        all_mix       = mix_full.cpu().numpy()
 
-        # --- ATAC cells: project gene_activity through the same encoder ---
-        # gene_activity is (C_atac, G) — same gene space as X, so encoder applies directly
-        gene_act_t = torch.tensor(gene_activity, dtype=torch.float32)
-        h_atac = cell_encoder.encoder(gene_act_t)    # (C_atac, 64)
-        z_atac, _ = ld_decoder(h_atac)
-        z_atac = z_atac.cpu().numpy()                # (C_atac, 2)
+    # first-moment pooling of the final gene-space velocity (denoise before projection). The arrow
+    # of time is committor-locked, so this cannot reverse the flow — it only removes per-cell jitter.
+    if SMOOTH_VELOCITY:
+        V_pred = np.asarray(S_mom @ V_pred, dtype=np.float32)
 
-        # --- Center and scale for plotting (doesn't affect saved z_2d_np) ---
-        # We fit scaler on RNA only so RNA occupies the center; ATAC is transformed consistently
-        scaler = StandardScaler()
-        z_rna_plot  = scaler.fit_transform(z_rna)
-        z_atac_plot = scaler.transform(z_atac)
-        
-        gene_loadings = ld_decoder.get_gene_loadings()   # (G, 2)
-        
-        # Scale loadings to match the standardised space
-        # (W_dec maps from 2D to gene space; the transpose gives gene directions in 2D)
-        # Magnitude of each gene's loading arrow
-        loading_scale = 2.0 / (np.abs(gene_loadings).max() + 1e-8)
-        gene_loadings_plot = gene_loadings * loading_scale
-        
-        plot_ld_embedding(
-            z_2d_rna    = z_rna_plot,
-            pseudo_norm = pseudo_norm,
-            gene_loadings = gene_loadings_plot,
-            A_genes     = A_genes,
-            z_2d_atac   = z_atac_plot,
-            highlight_genes = ['CD34', 'MPO', 'LYZ', 'GATA1', 'SPI1', 'CEBPA'],
-            save_path   = f"{d}/ld_embedding_biplot.png"
-        )
-        
-        print(f"RNA z_2d std per dim: {z_rna.std(axis=0).round(3)}")
-        print(f"ATAC z_2d std per dim: {z_atac.std(axis=0).round(3)}")
-        print("If stds are similar, both dims are active. If one is near 0, collapse persists.")
+    np.save(f"{out_dir}/V_pred.npy", V_pred);          np.save(f"{out_dir}/A_dict.npy", A_dict_np)
+    np.save(f"{out_dir}/A_base.npy", A_base_np);        np.save(f"{out_dir}/A_learned.npy", A_learned)
+    np.save(f"{out_dir}/mix_weights.npy", all_mix);     np.save(f"{out_dir}/steady_state.npy", steady_full)
+    np.save(f"{out_dir}/A_genes.npy", b.A_genes);       np.save(f"{out_dir}/A_tfs.npy", b.A_tfs)
+    np.save(f"{out_dir}/committor_q.npy", q_commit);    np.save(f"{out_dir}/loss_history.npy", np.array(loss_history))
+    np.save(f"{out_dir}/root_mask.npy", root_mask);     np.save(f"{out_dir}/sink_mask.npy", sink_mask)
+    np.save(f"{out_dir}/phi.npy", phi)
+    print(f"  saved -> {out_dir}")
 
-    
-    print("Training complete.")
-
-    return {
-        "V_pred": V_pred,
-        "A_dict": A_dict_np,
-        "loss_history": loss_history,
-    }
+    return dict(V_pred=V_pred, mix=all_mix, A_learned=A_learned, A_dict=A_dict_np,
+                q_commit=q_commit, root_mask=root_mask, sink_mask=sink_mask, phi=phi,
+                grn=grn, cell_encoder=cell_encoder, vel_head=vel_head)
