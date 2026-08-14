@@ -99,19 +99,41 @@ def run_comet(b, out_dir):
     gene_access_t = torch.tensor(b.gene_access, dtype=torch.float32)
 
     # ---- tensors + loader ----
-    X_t    = torch.tensor(b.X,    dtype=torch.float32)
-    X_TF_t = torch.tensor(b.X_TF, dtype=torch.float32)
+    # standardise the TF inputs: predict_rna is X_TF @ A.T with no intercept, so a weight is
+    # "RNA per unit of TF expression". In raw units that makes |A[:, t]| scale like
+    # 1/expression(t): a highly expressed TF needs a SMALL weight to reach a given target level
+    # and a barely expressed one needs a LARGE weight. Ranking edges by |A| therefore ranks TFs
+    # roughly in reverse order of how active they are — measured on the mHSC-E run,
+    # Spearman(per-TF mean |A|, TF expression) = -0.73, which put edge recovery *below* random
+    # because well-expressed TFs are exactly the hubs of the ChIP references.
+    #
+    # Dividing each TF column by its own SD makes a weight "RNA per SD of TF", i.e. a
+    # standardised coefficient, which is unit-free and directly comparable across TFs. A_learned
+    # is saved in those units, so downstream edge rankings are comparable without any post-hoc
+    # rescaling. Ported from cleanup.
+    X_TF = (b.X_TF - b.X_TF.mean(0)) / (b.X_TF.std(0) + 1e-8)
+    X_t    = torch.tensor(b.X,  dtype=torch.float32)
+    X_TF_t = torch.tensor(X_TF, dtype=torch.float32)
     q_t    = torch.tensor(q_target, dtype=torch.float32)
     cell_idx_t = torch.arange(b.N)
     tf_indices_in_G = torch.tensor(b.tf_indices_in_G, dtype=torch.long)
     dataset = TensorDataset(X_t, X_TF_t, cell_idx_t)
+    # drop_last=False: on small bundles, dropping the ragged tail every epoch costs whole
+    # optimizer steps (e.g. at 1071 cells / batch 512, drop_last=True leaves only 2 steps/epoch).
+    # Every loss term here is batch-size agnostic, so a short final batch is safe. Ported from
+    # cleanup.
     loader  = DataLoader(dataset, batch_size=BATCH_SIZE,
-                         sampler=RandomSampler(dataset, replacement=False), drop_last=True)
+                         sampler=RandomSampler(dataset, replacement=False), drop_last=False)
 
     # ---- models ----
     grn = GRNDictionary(G=G, T=T, M=b.M, D=D_ATOMS)
     grn.TF_access = TF_access_t.clone(); grn.Gene_access = gene_access_t.clone()
-    grn.mean_tf = torch.tensor(b.X_TF.mean(0), dtype=torch.float32)
+    # Representative TF input for diversity_loss's prediction-space term, which evaluates each
+    # atom on it and penalises atoms whose OUTPUTS agree. X_TF is now standardised so its column
+    # mean is 0 by construction, and feeding that in would make every atom predict ~0 and the
+    # term vanish silently. Mean absolute deviation keeps a per-TF, positive, typical-magnitude
+    # input in the same units the model now consumes. Ported from cleanup.
+    grn.mean_tf = torch.tensor(np.abs(X_TF).mean(0), dtype=torch.float32)
     grn.init_from_atoms(init_atoms_from_soft_targets(b.X, q_target, b.M, b.A_tfs))
     cell_encoder = CellStateEncoder(G=G, D=D_ATOMS); cell_encoder.init_from_soft_targets(b.X, q_target, n_epochs=40)
     vel_head = DictVelocityHead(G=G)
