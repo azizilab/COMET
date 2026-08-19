@@ -139,12 +139,25 @@ def clean_tf_name(tf):
     return [tf]
 
 
-def _load_bulk_atac_dataset(base, name, rna_file, atac_mtx, atac_peaks_file, decipher_npz,
-                            cell_type_col, pseudotime_col, rna_layer=None):
-    """Shared body for datasets sharing hema's file layout (unpaired RNA + pseudobulk ATAC +
-    peak_tf/peak_gene motif prior + a single decipher_embeddings.npz) -- ported from cleanup's
-    generic build_universe/build_M/build_gene_priors pipeline. rna_layer selects an
-    `rna_adata.layers[...]` entry instead of `.X` for datasets whose `.X` isn't raw counts."""
+def load_generic(base, name, rna_file=None, atac_mtx=None, atac_peaks_file=None,
+                 decipher_npz=None, cell_type_col="cell_type", pseudotime_col="pseudotime",
+                 rna_layer=None):
+    """The canonical loader for any dataset that isn't one of the 3 bespoke ones (hema/aml89/
+    ma2020). This is the ONLY loader path for new/non-default datasets -- see
+    README_DATASETS.md for the exact file contract it expects inside `base`. Shared body for
+    datasets sharing hema's file layout (unpaired RNA + pseudobulk ATAC + peak_tf/peak_gene
+    motif prior + a single decipher_embeddings.npz) -- ported from cleanup's generic
+    build_universe/build_M/build_gene_priors pipeline.
+
+    rna_file/atac_mtx/atac_peaks_file/decipher_npz default to the canonical filenames inside
+    `base` (see README_DATASETS.md) when omitted; pass them explicitly to override. rna_layer
+    selects an `rna_adata.layers[...]` entry instead of `.X` for datasets whose `.X` isn't raw
+    counts.
+    """
+    rna_file        = rna_file        or f"{base}/rna.h5ad"
+    atac_mtx        = atac_mtx        or f"{base}/atac_matrix.mtx.gz"
+    atac_peaks_file = atac_peaks_file or f"{base}/atac_peaks.txt"
+    decipher_npz    = decipher_npz    or f"{base}/decipher_embeddings.npz"
     rna = ad.read_h5ad(rna_file)
     sc.pp.normalize_total(rna, target_sum=1e4, layer=rna_layer)
     sc.pp.log1p(rna, layer=rna_layer)
@@ -211,7 +224,7 @@ def load_nestorowa(base):
     builds the on-disk files this expects: Nestorowa_mHSC_E.h5ad with obs['cell_type'] and
     obs['PseudoTime'], plus a peak_tf/peak_gene/peaks prior reused (symlinked) from Paul15's
     mouse sciATAC atlas base GRN."""
-    return _load_bulk_atac_dataset(
+    return load_generic(
         base, "nestorowa",
         rna_file=f"{base}/Nestorowa_mHSC_E.h5ad",
         atac_mtx=f"{base}/atac_matrix.trimmed.mtx.gz",
@@ -228,7 +241,7 @@ def load_paul15(base):
     the peak_tf/peak_gene/peaks prior from CellOracle's mouse sciATAC atlas base GRN. Expects
     Paul_etal_15_2.h5ad with layers['raw_count_int'] (`.X` there is log1p+scaled, not raw),
     obs['paul15_clusters'] for cell type, and obs['dpt_pseudotime'] for pseudotime."""
-    return _load_bulk_atac_dataset(
+    return load_generic(
         base, "paul15",
         rna_file=f"{base}/Paul_etal_15_2.h5ad",
         atac_mtx=f"{base}/atac_matrix.trimmed.mtx.gz",
