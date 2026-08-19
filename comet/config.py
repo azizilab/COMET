@@ -51,13 +51,13 @@ DATA_PAUL15 = {
     "decipher_outputs": f"{_PAUL15}/decipher_embeddings.npz",
 }
 
-DATA = DATA_NESTOROWA_MHSC_E
+DATA = DATA_PAUL15
 
 
 # --- model / training -------------------------------------------------------
 
 MODEL = {
-    "D_ATOMS": 4,
+    "D_ATOMS": 6,
     "LD_HIDDEN": 64,
 }
 
@@ -116,5 +116,5 @@ TRAIN = {
         "ETA_MIN": 1e-5
     },
 
-    "OUTPUT_DIR": "/home/elicanter/nestorowa_newtest",
+    "OUTPUT_DIR": "/home/elicanter/paul_newtest",
 }

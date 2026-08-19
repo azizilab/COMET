@@ -143,7 +143,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
     ap.add_argument("--grn", default="learned", choices=["learned", "base", "mixture"])
-    ap.add_argument("--label", default="COSMOS", help="method name shown in the figure")
+    ap.add_argument("--label", default="COMET", help="method name shown in the figure")
     ap.add_argument("--panel", type=int, default=0,
                     help="0=full universe; 500/1000=all TFs + top-N varying genes")
     ap.add_argument("--gene-ordering", default=DEFAULT_GENE_ORDERING)
@@ -156,7 +156,7 @@ def main():
     workdir = os.path.abspath(args.workdir or os.path.join(args.run, "bleval"))
     in_dir = os.path.join(workdir, "inputs")
     out_dir = os.path.join(workdir, "outputs")
-    exp = "cosmos"
+    exp = "comet"
 
     A_genes, A_tfs, absW = load_grn(args.run, args.grn)
     universe, panel_tag = make_universe(A_genes, A_tfs, args.panel, args.gene_ordering)
