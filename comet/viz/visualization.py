@@ -1,20 +1,34 @@
-import io
 import os
 
 import numpy as np
-
 import matplotlib.pyplot as plt
 
-from PIL import Image
-
-from sklearn.neighbors import NearestNeighbors
 from sklearn.decomposition import PCA
-from scipy.ndimage import gaussian_filter
-from scipy.spatial import cKDTree
 
-from config import RANDOM_STATE
+from config import RANDOM_STATE, OUT_DIR, FORCE_EMB
 from utils.common import zscore_cols
-from utils.committor import palette_for, scatter_types
+
+
+def palette_for(cts):
+    u = np.unique(cts); cmap = plt.cm.tab20 if len(u) > 10 else plt.cm.tab10
+    return {c: cmap(i / max(1, len(u)-1)) for i, c in enumerate(u)}
+
+def scatter_types(ax, V, cts, pal, s=10, alpha=0.35, legend=False):
+    for c in np.unique(cts):
+        m = cts == c
+        ax.scatter(V[m,0], V[m,1], c=[pal[c]], s=s, alpha=alpha, edgecolors='none', label=c, rasterized=True)
+    if legend: ax.legend(loc='upper left', bbox_to_anchor=(1.02,1), frameon=False, fontsize=7)
+    ax.set_xticks([]); ax.set_yticks([])
+
+
+def align_to(emb2d, ref2d):
+    """Rotate / reflect emb2d onto ref2d (orthogonal Procrustes on the centred coordinates; no scaling, no shear), so
+    an embedding with an arbitrary orientation (UMAP, PCA) is shown in the reference's orientation. The result is
+    re-centred on the reference's centre."""
+    X = np.asarray(emb2d, np.float64); Y = np.asarray(ref2d, np.float64)
+    Xc, Yc = X - X.mean(0), Y - Y.mean(0)
+    U, _, Vt = np.linalg.svd(Xc.T @ Yc)
+    return (Xc @ (U @ Vt) + Y.mean(0)).astype(np.float32)
 
 
 def clean_quiver(ax, V2D, emb, cts, title, pal=None, n_grid=22, root_mask=None):
@@ -34,166 +48,87 @@ def clean_quiver(ax, V2D, emb, cts, title, pal=None, n_grid=22, root_mask=None):
     ax.set_title(title, fontsize=10, fontweight='bold'); ax.set_xticks([]); ax.set_yticks([])
 
 
-def make_embeddings(b, seed=RANDOM_STATE, wanted=None):
-    """Display embeddings: {name: (emb2d, kNN_source_space)}. These are DISPLAY projections only —
-    the same gene-space velocity is projected onto each; they do not change the trajectory.
-    `wanted` (a set/list of names) restricts which are built so UMAP isn't computed if unused.
-    decipher2d + pca2d are always available; the UMAP variants require `umap` (skipped if absent)."""
+def make_embeddings(b, seed=RANDOM_STATE, wanted=None, out_dir=None, force=None):
+    """Display embeddings: {name: (emb2d, kNN_source_space)}. These are DISPLAY projections only — the same
+    gene-space velocity is projected onto each; they do not change the trajectory. `wanted` (a set/list of names)
+    restricts which are built so UMAP isn't computed if unused. decipher2d + pca2d are always available; the UMAP
+    variants require `umap` (skipped if absent).
+
+    decipher2d is Decipher's own 2D v, unchanged. Every other embedding is rotated / reflected onto it (align_to), so
+    all panels share the Decipher orientation and look the same across reruns. The raw 2D coordinates are cached to
+    {out_dir}/emb2d_{b.name}_seed{seed}.npz (out_dir defaults to {OUT_DIR}/{b.name}) and reused unless `force` (or
+    config.FORCE_EMB) is True, so UMAP is computed once."""
     want = None if wanted is None else set(wanted)
     need = lambda n: (want is None) or (n in want)
+    force = FORCE_EMB if force is None else force
+
+    ds_dir = out_dir or os.path.join(OUT_DIR, b.name)
+    cache_path = os.path.join(ds_dir, f"emb2d_{b.name}_seed{seed}.npz")
+    cached2d = {}
+    if not force and os.path.exists(cache_path):
+        with np.load(cache_path) as f:
+            cached2d = {k: f[k] for k in f.files}
+    raw2d = {}
+
+    def get2d(key, compute_fn):
+        raw2d[key] = cached2d[key] if key in cached2d else np.asarray(compute_fn(), np.float32)
+        return raw2d[key] if key == "decipher2d" else align_to(raw2d[key], b.V_dec2)
+
     E = {}
-    E["decipher2d"] = (b.V_dec2, b.Z_dec)
     Xz = zscore_cols(b.X)
-    Xp = PCA(n_components=min(30, b.G - 1, b.N - 1), random_state=seed).fit_transform(Xz)
-    E["pca2d"] = (Xp[:, :2].astype(np.float32), Xp.astype(np.float32))
+    Xp = PCA(n_components=min(30, b.G - 1, b.N - 1), random_state=seed).fit_transform(Xz).astype(np.float32)
+
+    if need("decipher2d"):
+        E["decipher2d"] = (get2d("decipher2d", lambda: b.V_dec2), b.Z_dec)
+    if need("pca2d"):
+        E["pca2d"] = (get2d("pca2d", lambda: Xp[:, :2]), Xp)
     if need("umap_decipher") or need("umap_pca"):
         try:
             import umap
             if need("umap_decipher"):
-                E["umap_decipher"] = (umap.UMAP(random_state=seed, n_neighbors=15, min_dist=0.3)
-                                      .fit_transform(b.Z_dec).astype(np.float32), b.Z_dec)
+                E["umap_decipher"] = (get2d("umap_decipher", lambda: umap.UMAP(
+                    random_state=seed, n_neighbors=15, min_dist=0.3).fit_transform(b.Z_dec)), b.Z_dec)
             if need("umap_pca"):
-                E["umap_pca"]      = (umap.UMAP(random_state=seed, n_neighbors=15, min_dist=0.3)
-                                      .fit_transform(Xp).astype(np.float32), Xp.astype(np.float32))
+                E["umap_pca"] = (get2d("umap_pca", lambda: umap.UMAP(
+                    random_state=seed, n_neighbors=15, min_dist=0.3).fit_transform(Xp)), Xp)
         except Exception as e:
             print(f"  [umap unavailable, plotting decipher2d + pca2d only: {e}]")
+
+    new2d = {k: v for k, v in raw2d.items() if k not in cached2d}
+    if new2d:
+        os.makedirs(ds_dir, exist_ok=True)
+        np.savez(cache_path, **{**cached2d, **new2d})
+
     return E
 
 
-class VelocityGIFMaker:
-    def __init__(self, dpi=100, mode="Decipher"):
-        self.dpi = dpi
-        self.frames = []
-        self.mode = mode
- 
-    def _render_frame(self, X_2d, V_2d, pseudo_norm, epoch):
- 
-        plt.rcParams['font.family'] = 'sans-serif'
-        plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
-        plt.rcParams['svg.fonttype'] = 'none'
- 
-        fig, ax = plt.subplots(figsize=(4, 3.5), dpi=150)
- 
-        sc = ax.scatter(
-            X_2d[:, 0], X_2d[:, 1],
-            c=pseudo_norm, cmap="viridis",
-            s=20, alpha=0.6, edgecolors='none', rasterized=True
-        )
- 
-        # ── Grid setup — MUST MATCH manual plot ──────────────────────────────
-        density = 2
-        grid_n  = int(60 * density)
- 
-        x_min, x_max = X_2d[:, 0].min(), X_2d[:, 0].max()
-        y_min, y_max = X_2d[:, 1].min(), X_2d[:, 1].max()
- 
-        x_grid = np.linspace(x_min, x_max, grid_n)
-        y_grid = np.linspace(y_min, y_max, grid_n)
-        Xg, Yg = np.meshgrid(x_grid, y_grid)
-        grid_points = np.c_[Xg.ravel(), Yg.ravel()]
- 
-        # ── Sparse sampling ───────────────────────────────────────────────────
-        n_cells = min(3000, len(X_2d))
-        cell_idx = np.random.choice(len(X_2d), n_cells, replace=False)
-        X_small = X_2d[cell_idx]
-        V_small = V_2d[cell_idx]
- 
-        # ── kNN projection onto grid ──────────────────────────────────────────
-        k = 20
-        nbrs = NearestNeighbors(n_neighbors=k).fit(X_small)
-        _, idx = nbrs.kneighbors(grid_points)
-        V_grid = V_small[idx].mean(axis=1)
- 
-        # ── Cell support mask — MUST USE SAME PERCENTILE AS MANUAL PLOT ──────
-        nbrs_cells = NearestNeighbors(n_neighbors=1).fit(X_2d)
-        dist_to_cells, _ = nbrs_cells.kneighbors(grid_points)
-        dist_to_cells = dist_to_cells.ravel()
-        
-        # KEY FIX: 40th percentile — same as the manual scVelo-style plot
-        support_threshold = np.percentile(dist_to_cells, 40)
-        support_mask = dist_to_cells < support_threshold
- 
-        # ── Velocity magnitude mask — MUST MATCH ─────────────────────────────
-        speed = np.linalg.norm(V_grid, axis=1)
-        cutoff_speed = np.percentile(speed, 35)
-        velocity_mask = speed > cutoff_speed
- 
-        # ── Combined mask ─────────────────────────────────────────────────────
-        final_mask = support_mask & velocity_mask
-        if final_mask.sum() == 0:
-            final_mask = np.ones(len(grid_points), dtype=bool)
- 
-        grid_points_f = grid_points[final_mask]
-        V_grid_f      = V_grid[final_mask]
- 
-        # ── Reproject onto structured grid ────────────────────────────────────
-        tree = cKDTree(grid_points_f)
-        _, nn = tree.query(np.c_[Xg.ravel(), Yg.ravel()], k=1)
- 
-        U = V_grid_f[nn, 0].reshape(Xg.shape)
-        W = V_grid_f[nn, 1].reshape(Yg.shape)
- 
-        # Apply support mask to structured grid
-        grid_dist, _ = nbrs_cells.kneighbors(np.c_[Xg.ravel(), Yg.ravel()])
-        grid_mask = grid_dist.ravel() < support_threshold
- 
-        U_flat = U.ravel(); W_flat = W.ravel()
-        U_flat[~grid_mask] = 0.0
-        W_flat[~grid_mask] = 0.0
-        U = U_flat.reshape(Xg.shape)
-        W = W_flat.reshape(Yg.shape)
- 
-        # ── Gaussian smoothing ────────────────────────────────────────────────
-        U = gaussian_filter(U, sigma=1.2)
-        W = gaussian_filter(W, sigma=1.2)
- 
-        # ── Streamplot ────────────────────────────────────────────────────────
-        ax.streamplot(
-            Xg, Yg, U, W,
-            color="black", density=1.2,
-            linewidth=1, arrowsize=1, arrowstyle='-|>',
-            minlength=0.2, integration_direction='both', zorder=3
-        )
- 
-        mode_label = self.mode
-        ax.set_xlabel(f"{mode_label} 1", fontsize=11, fontweight='bold')
-        ax.set_ylabel(f"{mode_label} 2", fontsize=11, fontweight='bold')
-        ax.set_title(f"Velocity ({mode_label}) @ Epoch {epoch}",
-                     fontsize=11, fontweight='bold')
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
- 
-        cbar = plt.colorbar(sc, ax=ax, fraction=0.04, pad=0.04)
-        cbar.set_label("Pseudotime", fontsize=10)
-        cbar.outline.set_visible(False)
- 
-        plt.tight_layout()
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-        plt.close(fig)
-        buf.seek(0)
-        return Image.open(buf).copy()
- 
-    def add_frame(self, X_2d, V_2d_smooth, pseudo_norm, epoch):
-        img = self._render_frame(X_2d, V_2d_smooth, pseudo_norm, epoch)
-        self.frames.append(img)
- 
-    def save(self, path="velocity_training.gif", fps=4):
-        if not self.frames:
-            print("No frames to save.")
-            return
-        duration_ms = int(1000 / fps)
-        self.frames[0].save(
-            path, save_all=True, append_images=self.frames[1:],
-            loop=0, duration=duration_ms,
-        )
-        print(f"Saved GIF ({len(self.frames)} frames): {path}")
- 
-    def save_slide_png(self, path="velocity_final_frame.png"):
-        if not self.frames:
-            print("No frames."); return
-        last = self.frames[-1]
-        w, h = last.size
-        last.resize((w * 2, h * 2), Image.LANCZOS).save(path, dpi=(300, 300))
-        print(f"Saved slide PNG: {path}")
- 
+def plot_celltypes_pseudotime(b, embeddings, q, root_mask, sink_mask, path, names=("decipher2d", "umap_decipher")):
+    """One row per display embedding: left = cell types (labelled at their medians), right = committor pseudotime q
+    with the root (green, star = centroid) and sink (red) cells outlined."""
+    names = [n for n in names if n in embeddings]
+    cts = b.cell_types; pal = palette_for(cts); types = np.unique(cts); s = 14 if b.N < 3000 else 6
+    fig, axes = plt.subplots(len(names), 2, figsize=(11, 4.75 * len(names)), squeeze=False)
+    for r, en in enumerate(names):
+        emb = embeddings[en][0]; ax = axes[r, 0]
+        for t in types:
+            m = cts == t
+            ax.scatter(emb[m, 0], emb[m, 1], s=s, c=[pal[t]], alpha=.75, edgecolors="none", label=f"{t} ({m.sum()})",
+                       rasterized=True)
+        for t in types:
+            cx, cy = np.median(emb[cts == t], 0)
+            ax.text(cx, cy, t, fontsize=8, fontweight="bold", ha="center", va="center",
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=pal[t], alpha=.85))
+        ax.set_title(f"{b.name} — {en}: cell types", fontweight="bold"); ax.set_xticks([]); ax.set_yticks([])
+        if r == len(names) - 1:
+            ax.legend(loc="upper left", bbox_to_anchor=(-0.02, -0.02), ncol=4, frameon=False, fontsize=7, markerscale=2)
+        ax = axes[r, 1]
+        sc_ = ax.scatter(emb[:, 0], emb[:, 1], c=q, s=s, cmap="viridis", edgecolors="none", rasterized=True)
+        ax.scatter(emb[sink_mask, 0], emb[sink_mask, 1], s=s * 1.6, facecolors="none", edgecolors="red", lw=.6,
+                   label="sinks")
+        ax.scatter(emb[root_mask, 0], emb[root_mask, 1], s=s * 1.6, facecolors="none", edgecolors="lime", lw=.6,
+                   label="root cells")
+        ax.scatter(*emb[root_mask].mean(0), marker="*", s=380, c="lime", edgecolors="k", zorder=5)
+        plt.colorbar(sc_, ax=ax, fraction=.04, label="committor pseudotime q")
+        ax.set_title(f"{b.name} — {en}: COMET pseudotime", fontweight="bold"); ax.set_xticks([]); ax.set_yticks([])
+        ax.legend(fontsize=8)
+    plt.tight_layout(); plt.savefig(path, dpi=150, bbox_inches="tight"); plt.close(fig)

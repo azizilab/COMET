@@ -13,7 +13,7 @@ from sklearn.preprocessing import normalize
 from sklearn.neighbors import NearestNeighbors
 from sklearn.model_selection import train_test_split
 
-from config import N_TOP_HVG, K_MOMENT, RANDOM_STATE, MA_TARGET_CELLS, AML_TARGET_CELLS, MA_KEEP
+from config import N_TOP_HVG, K_MOMENT, RANDOM_STATE, MA_TARGET_CELLS, AML_TARGET_CELLS, MA_KEEP, MA_PSEUDOBULK_SMOOTH
 from utils.common import as_dense, norm_name, knn_smooth
 from utils.geometry import build_local_atac
 
@@ -28,6 +28,9 @@ class Bundle:
     adata: Optional[ad.AnnData] = None
     ga_true: Optional[np.ndarray] = None
     sub_g2i: dict = field(default_factory=dict)
+    # raw per-cell gene activity that ga_matched was pseudo-bulked from (per ATAC cell if unpaired, per RNA cell if
+    # paired); utils/trajectory.py rebuilds the pseudo-bulk from it at other resolutions.
+    ga_atac_cells: Optional[np.ndarray] = None
     @property
     def N(self): return self.X.shape[0]
     @property
@@ -38,7 +41,7 @@ class Bundle:
 
 def finish_bundle(name, paired, rna_adata, X_full, gene_names_all, gene_to_idx_full,
                   A_genes, A_tfs, M, gene_activity_per_rna_cell, Z_dec, V_dec2,
-                  cell_types, pseudo_norm, adata=None):
+                  cell_types, pseudo_norm, adata=None, raw_ga=None, ga_atac_cells=None):
     sub_g2i = {g: i for i, g in enumerate(A_genes)}
     gene_idx = np.array([gene_to_idx_full[g] for g in A_genes], int)
     tf_idx   = np.array([gene_to_idx_full[t] for t in A_tfs], int)
@@ -49,12 +52,14 @@ def finish_bundle(name, paired, rna_adata, X_full, gene_names_all, gene_to_idx_f
     nbrs = NearestNeighbors(n_neighbors=K_MOMENT).fit(Z_dec); _, ni = nbrs.kneighbors(Z_dec)
     ga = knn_smooth(ga, ni, k=K_MOMENT)                    # single upstream denoise step
     gacc = ga.mean(0); gacc = (gacc - gacc.min()) / (gacc.max() - gacc.min() + 1e-8)
+    ga_true = (raw_ga.astype(np.float32) if raw_ga is not None else ga) if paired else None
     return Bundle(name=name, paired=paired, X=X, X_TF=X_TF, ga_matched=ga,
                   M=M.astype(np.float32), A_genes=A_genes, A_tfs=A_tfs,
                   tf_indices_in_G=tf_indices_in_G, Z_dec=Z_dec.astype(np.float32),
                   V_dec2=V_dec2.astype(np.float32), cell_types=np.asarray(cell_types).astype(str),
                   pseudo_norm=pseudo_norm.astype(np.float32), gene_access=gacc.astype(np.float32),
-                  adata=adata, ga_true=(ga if paired else None), sub_g2i=sub_g2i)
+                  adata=adata, ga_true=ga_true, sub_g2i=sub_g2i,
+                  ga_atac_cells=None if ga_atac_cells is None else np.asarray(ga_atac_cells, np.float32))
 
 
 def load_decipher(decipher_dir):
@@ -130,9 +135,7 @@ def assign_velten_celltypes(rna, X_full, g2i):
 
 
 def clean_tf_name(tf):
-    """Motif name -> list of gene symbols (dimers "A::B" / "A-B" split, variants dropped).
-    Ported from cleanup; only used by _load_bulk_atac_dataset below, so it never changes
-    TF-matching behavior for the existing hema/aml89/ma2020 loaders."""
+    """Motif name -> list of gene symbols (dimers "A::B" / "A-B" split, variants dropped). Used by load_generic."""
     tf = re.sub(r"\(var\..*\)", "", tf)
     if "::" in tf: return tf.split("::")
     if "-" in tf: return tf.split("-")
@@ -142,12 +145,8 @@ def clean_tf_name(tf):
 def load_generic(base, name, rna_file=None, atac_mtx=None, atac_peaks_file=None,
                  decipher_npz=None, cell_type_col="cell_type", pseudotime_col="pseudotime",
                  rna_layer=None):
-    """The canonical loader for any dataset that isn't one of the 3 bespoke ones (hema/aml89/
-    ma2020). This is the ONLY loader path for new/non-default datasets -- see
-    README_DATASETS.md for the exact file contract it expects inside `base`. Shared body for
-    datasets sharing hema's file layout (unpaired RNA + pseudobulk ATAC + peak_tf/peak_gene
-    motif prior + a single decipher_embeddings.npz) -- ported from cleanup's generic
-    build_universe/build_M/build_gene_priors pipeline.
+    """Loader for every dataset without a bespoke loader (all but hema/aml89/ma2020): unpaired RNA + ATAC +
+    peak_tf/peak_gene motif prior + decipher_embeddings.npz. File contract: README_DATASETS.md.
 
     rna_file/atac_mtx/atac_peaks_file/decipher_npz default to the canonical filenames inside
     `base` (see README_DATASETS.md) when omitted; pass them explicitly to override. rna_layer
@@ -215,29 +214,24 @@ def load_generic(base, name, rna_file=None, atac_mtx=None, atac_peaks_file=None,
     pt = (pt - np.nanmin(pt)) / (np.ptp(pt[finite]) + 1e-8) if finite.any() else pt
     rna.obsm["X_decipher"] = V_dec2
     return finish_bundle(name, False, rna, X_full, gene_names_all, g2i, A_genes, A_tfs, M,
-                         ga_matched, Z_dec, V_dec2, cell_types, pt, adata=rna)
+                         ga_matched, Z_dec, V_dec2, cell_types, pt, adata=rna, ga_atac_cells=ga_atac)
 
 
 def load_nestorowa(base):
-    """BEELINE Nestorowa 2016 mHSC-E lineage -- ported from cleanup's DATA_NESTOROWA_MHSC_E /
-    generic build_universe pipeline. comet/scripts/build_nestorowa_mhsc.py (cleanup branch)
-    builds the on-disk files this expects: Nestorowa_mHSC_E.h5ad with obs['cell_type'] and
-    obs['PseudoTime'], plus a peak_tf/peak_gene/peaks prior reused (symlinked) from Paul15's
-    mouse sciATAC atlas base GRN."""
+    """Nestorowa et al. 2016 mouse HSPCs (1654 cells), built by comet/scripts/build_nestorowa.py: rna.h5ad with
+    layers['raw_count_int'], obs['cell_type'] (sort gates) and obs['pseudotime'] (mean BEELINE Slingshot pseudotime;
+    validation only), plus paul15's mouse sciATAC atlas and GRN prior, symlinked."""
     return load_generic(
         base, "nestorowa",
-        rna_file=f"{base}/Nestorowa_mHSC_E.h5ad",
         atac_mtx=f"{base}/atac_matrix.trimmed.mtx.gz",
         atac_peaks_file=f"{base}/atac_matrix.trimmed.peaks.txt",
-        decipher_npz=f"{base}/decipher_embeddings.npz",
-        cell_type_col="cell_type", pseudotime_col="PseudoTime",
+        cell_type_col="cell_type", pseudotime_col="pseudotime",
         rna_layer="raw_count_int",
     )
 
 
 def load_paul15(base):
-    """Paul et al. 2015 mouse hematopoiesis -- ported from cleanup's DATA_PAUL15 / generic
-    build_universe pipeline. comet/scripts/build_paul15_universe.py (cleanup branch) builds
+    """Paul et al. 2015 mouse hematopoiesis. comet/scripts/build_paul15_universe.py (cleanup branch) builds
     the peak_tf/peak_gene/peaks prior from CellOracle's mouse sciATAC atlas base GRN. Expects
     Paul_etal_15_2.h5ad with layers['raw_count_int'] (`.X` there is log1p+scaled, not raw),
     obs['paul15_clusters'] for cell type, and obs['dpt_pseudotime'] for pseudotime."""
@@ -252,7 +246,7 @@ def load_paul15(base):
     )
 
 
-# ---- the three loaders (verbatim data contracts) ----
+# ---- bespoke loaders ----
 def load_hema(base):
     RNA_H5AD=f"{base}/velten_rna.h5ad"; PEAK_TF_MTX=f"{base}/peak_tf.mtx"
     TF_NAMES_TXT=f"{base}/tf_names.txt"; PEAK_GENE_CSV=f"{base}/peak_gene.csv"
@@ -292,12 +286,31 @@ def load_hema(base):
     cell_types = assign_velten_celltypes(rna, X_full, g2i)
     pt = rna.obs["facs_pseudotime"].astype(np.float32).values; pt = (pt-pt.min())/(np.ptp(pt)+1e-8)
     rna.obsm["X_decipher"] = V_dec2
-    return finish_bundle("hema", False, rna, X_full, gene_names_all, g2i, A_genes, A_tfs, M, ga_matched, Z_dec, V_dec2, cell_types, pt, adata=rna)
+    return finish_bundle("hema", False, rna, X_full, gene_names_all, g2i, A_genes, A_tfs, M, ga_matched, Z_dec, V_dec2, cell_types, pt, adata=rna, ga_atac_cells=ga_atac)
 
-def load_aml89(base):
+def overlap_intervals(q_chr, q_start, q_end, t_chr, t_start, t_end):
+    """All (query i, target j) pairs whose intervals overlap (start < other end on both sides). Targets must be
+    non-overlapping and sorted by start within each chromosome (true for MERGE_peaks.csv: fixed 500 bp, sorted)."""
+    pairs = []
+    t_start, t_end = np.asarray(t_start, np.int64), np.asarray(t_end, np.int64)
+    q_start, q_end = np.asarray(q_start, np.int64), np.asarray(q_end, np.int64)
+    for c in np.unique(q_chr):
+        tj = np.where(t_chr == c)[0]
+        if not len(tj): continue
+        ts, te = t_start[tj], t_end[tj]
+        assert np.all(np.diff(ts) >= 0) and np.all(np.diff(te) >= 0), f"target peaks on {c} not sorted/non-overlapping"
+        qi = np.where(q_chr == c)[0]
+        lo = np.searchsorted(te, q_start[qi], side="right")   # first target with end > q_start
+        hi = np.searchsorted(ts, q_end[qi], side="left")      # first target with start >= q_end
+        for i, a, b_ in zip(qi, lo, hi):
+            pairs.extend((i, j) for j in tj[a:b_])
+    return pairs
+
+def load_aml89(base, atac_sample_prefix="08H089"):
     RNA_H5=f"{base}/08H089_allsorted_cleaned.h5"; PEAK_TF=f"{base}/peak_tf.mtx"; TF_NAMES=f"{base}/tf_names.txt"
     PG_CSV=f"{base}/peak_gene.csv"; PEAKS_BED=f"{base}/peaks.bed"; M2G_CSV=f"{base}/motif_to_genes.csv"
     ATAC_MTX=f"{base}/MERGE_counts.mtx"; ATAC_PK=f"{base}/MERGE_peaks.csv"; DEC_NPZ=f"{base}/decipher_outputs_aml89/decipher_embeddings.npz"
+    ATAC_META=f"{base}/MERGE_cell_metadata.csv"
     try: rna = ad.read_h5ad(RNA_H5)
     except Exception: rna = sc.read_10x_h5(RNA_H5)
     rna.var_names_make_unique(); chosen = np.arange(rna.n_obs)
@@ -329,21 +342,32 @@ def load_aml89(base):
     A_tfs = np.array([t for t in A_tfs if t in gene2motifcols and t in g2i], str); tf_col = np.array([gene2motifcols[t][0] for t in A_tfs], int)
     M = M_full[:, tf_col].toarray().astype(np.float32)
     atac = scipy.io.mmread(ATAC_MTX).tocsr().T.astype(np.float32); pa = pd.read_csv(ATAC_PK); P2 = atac.shape[1]
+    assert len(pa) == P2, f"MERGE_peaks.csv has {len(pa)} rows but MERGE_counts.mtx has {P2} peaks"
+    # The ArchR project (gs://aml-scatac/ARCHR_p08H089) also merges a separate bone-marrow run, `BM2019`
+    # (= AMLATAC/BM_2019_01_10, not this patient). Keep only the patient's own ATAC cells.
+    meta = pd.read_csv(ATAC_META, index_col=0)
+    assert len(meta) == atac.shape[0], f"MERGE_cell_metadata.csv has {len(meta)} rows but MERGE_counts.mtx has {atac.shape[0]} cells"
+    patient = meta["Sample"].astype(str).str.startswith(atac_sample_prefix).values
+    assert patient.any(), f"no ATAC cells with Sample starting {atac_sample_prefix!r}"
+    atac = atac[patient]
+    # peak_gene.csv peaks are the prior's peak set (peaks.bed), NOT the MERGE ATAC peaks -> map by interval overlap
+    # (row i of peak_gene.csv is not ATAC peak i; the old row-index mapping scrambled ga_matched).
     pga = lil_matrix((P2,G), dtype=np.float32)
-    for idx, r in peak_gene.iterrows():
-        g = str(r[6])
-        if g in sub_g2i and idx < P2: pga[idx, sub_g2i[g]] = 1.0
+    keep = peak_gene[6].astype(str).isin(sub_g2i).values
+    for pr_i, at_j in overlap_intervals(peak_gene[0].astype(str).values[keep], peak_gene[1].values[keep], peak_gene[2].values[keep],
+                                        pa["seqnames"].astype(str).values, pa["start"].values, pa["end"].values):
+        pga[at_j, sub_g2i[str(peak_gene[6].values[keep][pr_i])]] = 1.0
     ga_atac = np.log1p(as_dense(normalize(atac @ pga.tocsr(), norm="l1", axis=1))).astype(np.float32)
     dec = np.load(DEC_NPZ); Z_dec = dec["z"][chosen].astype(np.float32); V_dec2 = dec["v"][chosen].astype(np.float32)
     ga_matched, _ = build_local_atac(X_full[:, [g2i[g] for g in A_genes]], ga_atac, Z_dec)
     cell_types = rna.obs['blast_cell_type_08H089'].astype(str).values
     pt = rna.obs['dm_0_rank'].astype(np.float32).values; pt = (pt-pt.min())/(np.ptp(pt)+1e-8)
     rna.obsm["X_decipher"] = V_dec2
-    return finish_bundle("aml89", False, rna, X_full, gene_names_all, g2i, A_genes, A_tfs, M, ga_matched, Z_dec, V_dec2, cell_types, pt, adata=rna)
+    return finish_bundle("aml89", False, rna, X_full, gene_names_all, g2i, A_genes, A_tfs, M, ga_matched, Z_dec, V_dec2, cell_types, pt, adata=rna, ga_atac_cells=ga_atac)
 
 def load_ma2020(base, target_cells=MA_TARGET_CELLS):
     RNA_H5AD=f"{base}/Ma-2020-RNA.h5ad"; ATAC_H5AD=f"{base}/Ma-2020-ATAC.h5ad"; PEAK_TF=f"{base}/ma2020_peak_tf.mtx"
-    TF_NAMES=f"{base}/ma2020_tf_names.txt"; PG_CSV=f"{base}/ma2020_peak_gene.csv"; DEC_DIR=f"{base}/paired_decipher_outputs2"
+    TF_NAMES=f"{base}/ma2020_tf_names.txt"; PG_CSV=f"{base}/ma2020_peak_gene.csv"; DEC_DIR=f"{base}/paired_decipher_outputs3"
     rna = ad.read_h5ad(RNA_H5AD); atac = ad.read_h5ad(ATAC_H5AD); assert rna.n_obs == atac.n_obs
     if not (rna.obs_names == atac.obs_names).all(): atac = atac[rna.obs_names].copy()
     ct_raw = rna.obs["cell_type"].astype(str); keep = ct_raw.isin(MA_KEEP).values
@@ -389,9 +413,16 @@ def load_ma2020(base, target_cells=MA_TARGET_CELLS):
     aX = atac.X.astype(np.float32)
     if not issparse(aX): aX = csr_matrix(aX)
     ga = np.log1p(as_dense(normalize(aX @ pg, norm="l1", axis=1))).astype(np.float32)
+    # per-cell SHARE-seq ATAC is very sparse: pseudo-bulk it over the same RNA clusters as the unpaired loaders, but
+    # with each cluster's own paired ATAC (no matching)
+    if MA_PSEUDOBULK_SMOOTH:
+        ga_in, _ = build_local_atac(X_full[:, [g2i[g] for g in A_genes]], ga, Z_dec, paired=True)
+    else:
+        ga_in = ga
     cell_types = rna.obs["cell_type"].astype(str).values
     pt = build_ma2020_pseudotime(rna, Z_dec, V_dec2); rna.obsm["X_decipher"] = V_dec2
-    return finish_bundle("ma2020", True, rna, X_full, gene_names_all, g2i, A_genes, A_tfs, M, ga, Z_dec, V_dec2, cell_types, pt, adata=rna)
+    return finish_bundle("ma2020", True, rna, X_full, gene_names_all, g2i, A_genes, A_tfs, M, ga_in, Z_dec, V_dec2, cell_types, pt,
+                         adata=rna, raw_ga=ga, ga_atac_cells=ga if MA_PSEUDOBULK_SMOOTH else None)
 
 LOADERS = {"hema": load_hema, "aml89": load_aml89, "ma2020": load_ma2020,
           "nestorowa": load_nestorowa, "paul15": load_paul15}

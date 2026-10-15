@@ -14,9 +14,6 @@ def zsc(v):
     v = np.asarray(v, np.float64)
     return ((v - v.mean()) / (v.std() + 1e-8)).astype(np.float32)
 
-def l2n(v, axis=-1, eps=1e-8):
-    return v / (np.linalg.norm(v, axis=axis, keepdims=True) + eps)
-
 def knn_smooth(signal, neighbor_idx, k=None):
     nb = neighbor_idx if k is None else neighbor_idx[:, :k]
     return signal[nb].mean(axis=1)

@@ -15,7 +15,8 @@ There are two ways to run COMET, and they're mutually exclusive per dataset:
 ```bash
 python train.py --datasets hema aml89
 ```
-No args at all runs `config.RUN_DATASETS` (currently `hema`, `ma2020`, `aml89`).
+No args at all runs `config.RUN_DATASETS` (currently `hema`, `ma2020`, `aml89`). Add `--trajectory-only` to
+compute only the trajectory (pseudotime + velocity field) and skip GRN training.
 
 ## Running a new dataset
 
@@ -43,12 +44,9 @@ python train.py --datasets hema --new-dataset name=my_ds base=/path/to/my_ds \
 | `pseudotime_col` | recommended | `obs` column name for pseudotime. Default: `pseudotime`. |
 | `rna_layer` | only if needed | Name of an `adata.layers[...]` entry to use instead of `.X` for raw counts. |
 | `rna_file`, `atac_mtx`, `atac_peaks_file`, `decipher_npz` | only if needed | Override individual file paths if you're not using the canonical filenames below. |
-| `entropy_root_trust` | tune if needed | See tuning guide below. Default: `1.0`. |
-| `commit_w_scale` | tune if needed | Default: `1.0`. |
+| `origin_sign` | tune if needed | `1` or `-1`; see tuning guide below. Default: `1`. |
 | `vel_moment_knn` | tune if needed | Default: `15`. |
-| `beta_perp` | tune if needed | Default: `0.5`. |
 | `state_space` | tune if needed | `decipher` or `pca`. Default: `decipher`. |
-| `marker_genes` | optional | Comma-separated gene list for plot annotation, e.g. `marker_genes=CD34,MPO,GATA1`. |
 | `display_embeddings` | optional | Comma-separated, e.g. `display_embeddings=decipher2d,pca2d`. |
 
 This same registration is available from Python (e.g. a notebook) via
@@ -66,7 +64,7 @@ via `rna_file=`/`atac_mtx=`/`atac_peaks_file=`/`decipher_npz=`.
 |---|---|---|
 | RNA anndata | `rna.h5ad` | AnnData. `obs_names` = cells, `var_names` = gene symbols. Raw (unnormalized) counts in `.X`, or in `layers[rna_layer]` if you pass `rna_layer=`. **Don't pre-normalize** — COMET does its own `normalize_total` + `log1p` + HVG selection. |
 | ↳ cell type | column in `rna.obs` | String/categorical. Column name given by `cell_type_col=` (default `cell_type`). |
-| ↳ pseudotime | column in `rna.obs` | Float, any range (rescaled to [0,1] internally; NaNs filled with the max). Column name given by `pseudotime_col=` (default `pseudotime`). **You must compute this upstream** (e.g. `scanpy.tl.dpt`) — the generic loader does not compute pseudotime for you. |
+| ↳ pseudotime | column in `rna.obs` | Float, any range (rescaled to [0,1] internally; NaNs filled with the max). Column name given by `pseudotime_col=` (default `pseudotime`). Used only for validation / plots, never by the method, but the loader requires it: compute it upstream (e.g. `scanpy.tl.dpt`). |
 | GRN prior: peak×motif | `peak_tf.mtx` | MatrixMarket, shape `(P peaks) x (M motifs)`, nonzero = motif hit in peak. Row order must exactly match `peaks.txt`. **Generated per-dataset — see below.** |
 | GRN prior: motif names | `tf_names.txt` | Whitespace-separated motif names, length `M`, one-to-one with `peak_tf.mtx` columns. A motif name should equal (or contain, for dimers like `GATA1::TAL1` — auto-split on `::`/`-`) a gene symbol present in the RNA `var_names`. Matching is exact/uppercase (not fuzzy). **Generated per-dataset — see below.** |
 | GRN prior: peak→gene links | `peak_gene.csv` | **Tab-separated**, header row, columns literally named `peak` and `gene`. `peak` values must match `peaks.txt` entries, in `chr-start-end` (dash-joined) format — `load_generic`'s peak-matching step assumes this exact format. **Generated per-dataset — see below.** |
@@ -80,8 +78,10 @@ smoothing) is handled identically for every dataset by `load_generic` — you do
 replicate any of that.
 
 If your raw files don't match this contract (e.g. no cell-type column and you need
-marker-gene-based typing like `hema`, or paired per-cell RNA+ATAC like `ma2020`), preprocess them
-into this format first — there is intentionally no per-dataset code path for new datasets.
+marker-gene-based typing like `hema`), preprocess them into this format first — there is intentionally no
+per-dataset code path for new datasets. `load_generic` treats RNA and ATAC as unpaired; paired per-cell RNA+ATAC
+(like `ma2020`) currently needs a bespoke loader that calls `build_local_atac(..., paired=True)` and passes
+`paired=True` plus the per-cell gene activity (`ga_atac_cells`) to `finish_bundle`, as `load_ma2020` does.
 
 ---
 
@@ -158,31 +158,26 @@ extra file you generate yourself** (`atac_peaks.txt` was never extra — it's sh
 
 **Recommended to review before trusting results** (wrong value doesn't error, it silently
 degrades the trajectory):
-- `entropy_root_trust` — **sign** encodes whether this is normal differentiation (root = high
-  chromatin entropy, `+1.0`) or reversed (e.g. malignant/dedifferentiating, like `aml89`'s
-  `-0.6`). **Magnitude** controls how strongly the committor field anchors the velocity. Wrong
-  sign flips your trajectory's direction.
-- `marker_genes` — only affects plots, but you'll want genes relevant to your biology to sanity-check the run.
+- `origin_sign` — the origin assumption: `1` = the origin is the most open / highest-entropy chromatin
+  (normal differentiation), `-1` = the least open (e.g. `aml89`). The wrong sign flips the trajectory.
 - `state_space` — `decipher` is normally right; fall back to `pca` if you don't trust/have a
   well-trained Decipher embedding for this dataset.
 - `vel_moment_knn` — denoising neighborhood size. Existing datasets use `15` for pseudobulk/already-smooth
   ATAC and `45` for noisy per-cell paired ATAC (`ma2020`). Set based on how sparse/noisy your ATAC is.
 
-**Safe to leave at defaults for a first run** (already tuned across 5 diverse datasets — these
-aren't exposed via `--new-dataset`; edit `config.py` directly if you need to revisit them):
-`beta_perp`/`commit_w_scale` fine-tuning beyond the table above, `COMMIT_LOSS_W`,
-`COMMIT_ROOT_Q`, `COMMIT_SINK_FRAC`, `COMMIT_GRAPH_K`, `D_ATOMS`, `N_EPOCHS`, `PHASE1_EPOCHS`,
-`BATCH_SIZE`, `GEO_TAU_SCALE`, `LAMBDA_GRN`, `LD_HIDDEN`, `LR_GRN`, `LR_VEL`, `GRN_PRUNE_FRAC`,
-`TARGET_CELLS_PER_EPOCH`, `W1`, `W2`, `N_TOP_HVG`, `K_MOMENT`.
+**Safe to leave at defaults for a first run** (these aren't exposed via `--new-dataset`; edit
+`config.py` directly if you need to revisit them): the trajectory settings `TRAJ_*`, `COMMIT_SINK_FRAC`,
+`COMMIT_GRAPH_K` (see the top-level `README.md`), the GRN training settings `D_ATOMS`, `N_EPOCHS`,
+`PHASE1_EPOCHS`, `BATCH_SIZE`, `GEO_TAU_SCALE`, `LD_HIDDEN`, `LR_GRN`, `TARGET_CELLS_PER_EPOCH(_PHASE2)`, `W1`,
+`W2`, and the data settings `N_TOP_HVG`, `K_MOMENT`.
 
 ---
 
 ## Output
 
-Each dataset writes to `comet_out/<name>/` (learned GRN, velocity arrays, plots), independent of
-every other dataset. `FORCE_RERUN=False` in `config.py` means a finished run for a given name is
-loaded from disk and skipped rather than retrained — delete `comet_out/<name>/` (or set
-`FORCE_RERUN=True`) to force a retrain.
+Each dataset writes to `<OUT_DIR>/<name>/` (`config.OUT_DIR`, default `comet_out_trajectory_final`); the
+files are listed in the top-level `README.md`. `FORCE_RERUN=False` in `config.py` means a finished run for a
+given name is loaded from disk and skipped — delete `<OUT_DIR>/<name>/` (or set `FORCE_RERUN=True`) to rerun.
 
 ---
 
@@ -222,4 +217,4 @@ python train.py --new-dataset name=my_ds base=/path/to/my_ds \
     cell_type_col=cell_type pseudotime_col=pseudotime
 ```
 
-Output lands in `comet_out/my_ds/`.
+Output lands in `comet_out_trajectory_final/my_ds/`.

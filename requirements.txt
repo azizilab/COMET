@@ -2,7 +2,8 @@ numpy
 pandas
 scipy
 anndata
+scanpy
 torch
 scikit-learn
 matplotlib
-pillow
+umap-learn  # optional: UMAP display embeddings (plots fall back to decipher2d / pca2d without it)

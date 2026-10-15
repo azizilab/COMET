@@ -217,7 +217,7 @@ def main():
 
     if motif_vals is None:
         for col in scan_df.columns:
-            if scan_df[col].astype(str).str.contains("GM\.").any():
+            if scan_df[col].astype(str).str.contains(r"GM\.").any():
                 motif_vals = scan_df[col].astype(str).values
                 break
 

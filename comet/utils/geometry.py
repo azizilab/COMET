@@ -38,19 +38,27 @@ def project_to_2d(V_pred_full, X_2d_vis, X_full, search_space=None, k=30, scale=
 
 
 def build_local_atac(X_rna, gene_activity_atac_cells, cluster_space,
-                     n_clusters=40, k_atac=8, seed=RANDOM_STATE):
-    """Per-cell ATAC accessibility via pseudo-bulk cluster matching (unpaired-safe).
-    Cluster in a space that resolves cell state (the Decipher LATENT), not 2D viz."""
+                     n_clusters=40, k_atac=8, seed=RANDOM_STATE, paired=False):
+    """Per-cell ATAC accessibility via pseudo-bulk clusters of the RNA cells (KMeans in cluster_space, which should
+    resolve cell state: the Decipher LATENT, not 2D viz). Each cluster's ATAC profile is
+      unpaired: the mean of the k_atac ATAC cells most similar (cosine) to the cluster's mean RNA;
+      paired:   the mean of the cluster's own cells' ATAC (gene_activity_atac_cells rows = RNA cells; no matching).
+    Returns (per-cell profile, min-max scaled per gene; cluster labels)."""
     G = X_rna.shape[1]
     km = MiniBatchKMeans(n_clusters=n_clusters, random_state=seed, n_init=5)
     labels = km.fit_predict(cluster_space)
-    cluster_rna = np.zeros((n_clusters, G), np.float32)
-    for c in range(n_clusters):
-        m = labels == c
-        if m.sum(): cluster_rna[c] = X_rna[m].mean(0)
-    cr = normalize(cluster_rna, norm='l2'); ga = normalize(gene_activity_atac_cells, norm='l2')
-    _, aidx = NearestNeighbors(n_neighbors=k_atac).fit(ga).kneighbors(cr)
-    cluster_access = np.stack([gene_activity_atac_cells[aidx[c]].mean(0) for c in range(n_clusters)])
+    if paired:
+        cluster_access = np.stack([gene_activity_atac_cells[labels == c].mean(0) if (labels == c).any()
+                                   else np.zeros(gene_activity_atac_cells.shape[1], np.float32)
+                                   for c in range(n_clusters)])
+    else:
+        cluster_rna = np.zeros((n_clusters, G), np.float32)
+        for c in range(n_clusters):
+            m = labels == c
+            if m.sum(): cluster_rna[c] = X_rna[m].mean(0)
+        cr = normalize(cluster_rna, norm='l2'); ga = normalize(gene_activity_atac_cells, norm='l2')
+        _, aidx = NearestNeighbors(n_neighbors=k_atac).fit(ga).kneighbors(cr)
+        cluster_access = np.stack([gene_activity_atac_cells[aidx[c]].mean(0) for c in range(n_clusters)])
     local = cluster_access[labels]
     lo, hi = local.min(0, keepdims=True), local.max(0, keepdims=True)
     return ((local - lo) / (hi - lo + 1e-8)).astype(np.float32), labels

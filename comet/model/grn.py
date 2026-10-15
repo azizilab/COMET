@@ -69,43 +69,6 @@ class GRNDictionary(nn.Module):
     def predict_rna(self, X_TF, weights):
         return (X_TF @ self.A_base.T) + self._atom_term(X_TF, weights)
 
-    @staticmethod
-    def _prune_top_frac(W, frac):
-        """Zero out everything but the top `frac` fraction (by |weight|) of each module's
-        entries, independently per module. W: (D, G, T). Ported from cleanup; used only by
-        production_from_lead below -- predict_rna and all GRN-inference losses always see the
-        full, dense A_base/A_dict."""
-        D = W.shape[0]
-        with torch.no_grad():
-            flat_abs = W.detach().abs().reshape(D, -1)
-            n_nonzero = (flat_abs > 0).sum(dim=1)
-            keep = torch.zeros_like(flat_abs, dtype=torch.bool)
-            for d in range(D):
-                nnz = int(n_nonzero[d].item())
-                if nnz == 0: continue
-                k = max(1, int(round(nnz * frac)))
-                if k >= nnz:
-                    keep[d] = flat_abs[d] > 0
-                else:
-                    thresh = torch.topk(flat_abs[d], k).values.min()
-                    keep[d] = flat_abs[d] >= thresh
-            keep = keep.reshape(W.shape)
-        return W * keep
-
-    def production_from_lead(self, tf_lead, weights, prune_frac=None):
-        """Effective per-cell GRN applied to the ATAC->RNA TF lead, for trajectory inference.
-        prune_frac (ported from cleanup): if set, propagates through a per-module top-`prune_frac`
-        sparsified copy of A_base/A_dict (keep only the strongest `prune_frac` of edges in each
-        module); None (default) propagates through the dense GRN, unchanged from before this port.
-        GRN inference itself (predict_rna, and every loss shaping A_base/A_dict) is never pruned."""
-        if prune_frac is None or prune_frac >= 1.0:
-            return (tf_lead @ self.A_base.T) + self._atom_term(tf_lead, weights)
-        A_base_pruned = self._prune_top_frac(self.A_base.unsqueeze(0), prune_frac)[0]
-        A_dict_pruned = self._prune_top_frac(self.A_dict, prune_frac)
-        P = torch.einsum('bt,dgt->dbg', tf_lead, A_dict_pruned)
-        atom_term = (P * weights.T.unsqueeze(-1)).sum(0)
-        return (tf_lead @ A_base_pruned.T) + atom_term
-
     def effective_A(self, weights_vec):
         return self.A_base + torch.einsum('d,dgt->gt', weights_vec, self.A_dict)
 
@@ -129,8 +92,7 @@ class GRNDictionary(nn.Module):
     def gene_access_consistency_loss(self):
         """Same idea as tf_access_consistency_loss, but gates by the TARGET gene's own
         chromatin accessibility instead of the regulating TF's -- an independent term (not
-        multiplied with the TF-side one), scaling whole rows rather than whole columns.
-        Ported from cleanup."""
+        multiplied with the TF-side one), scaling whole rows rather than whole columns."""
         closed = 1.0 - self.Gene_access.clamp(0, 1)
         dict_term = (torch.abs(self.A_dict) * closed.view(1, -1, 1)).mean()
         base_term = (torch.abs(self.A_base) * closed.unsqueeze(1)).mean()
