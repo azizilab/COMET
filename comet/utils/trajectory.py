@@ -16,7 +16,13 @@ trajectory_benchmarking/final_method_writeup.md. This module reproduces final_tr
     velocity      V = unit[(1 − w) u_bar + λ w c_hat],  w = g·(1 − min(1, Δq / P_plateau(Δq))),
                   g = 1[median ATAC↔RNA coupling ≥ coupling_min]
 
-Nothing here is trained and no labels are used.
+Nothing in final_trajectory is trained and no labels are used. After the GRN is trained, run_comet applies the
+regulatory-consistency tilt (regulatory_consistency_tilt below):
+    regulons      L_i = (A_base + Σ_k w_ik A_k)[:, expressed TFs] / σ   (self-edges removed; σ = gene SD, median-floored)
+    activity      a_i = (L_iᵀL_i + α_i I)⁻¹ L_iᵀ V_i                    TF activity velocity
+    explained     g_i = L_i a_i,  R²_i = <g_i, V_i> / ||V_i||²
+    tilt          ĝ, κ = tangent projection → forward cone along V → k_local average → (unit, coherence²)
+                  V' = unit[V + λ κ ĝ]
 """
 import numpy as np
 from scipy.sparse.csgraph import shortest_path, dijkstra
@@ -27,6 +33,7 @@ from sklearn.preprocessing import normalize as sk_normalize
 from config import (
     K_MOMENT, COMMIT_GRAPH_K, COMMIT_SINK_FRAC, TRAJ_ATAC_RES, TRAJ_ROOT_FRAC,
     TRAJ_N_SEEDS, TRAJ_K_LOCAL, TRAJ_PLATEAU_Q, TRAJ_LEAD_LAMBDA, TRAJ_COUPLING_MIN,
+    GRN_TILT_LAMBDA, GRN_TILT_ALPHA, GRN_TILT_MIN_DETECT,
 )
 from utils.common import zsc, zscore_cols, knn_smooth
 from utils.geometry import build_local_atac
@@ -224,3 +231,51 @@ def final_trajectory(b, Z, S_mom, sign=1.0, k_graph=COMMIT_GRAPH_K, k_local=TRAJ
               f"{'ON' if gate else 'OFF'} | plateau cells (w>0) {float((w > 0).mean()):.0%}")
     return dict(q=q, root_mask=root, sink_mask=sink, phi=phi, root_freq=freq, sink_freq=sink_freq, k_range=k_range,
                 u=u, u_valid=u_valid, u_bar=u_bar, lead=lead, coupling=coupling, gate=gate, w=w, V=V)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# regulatory-consistency tilt (applied after GRN training)
+# ---------------------------------------------------------------------------------------------------------------------
+def regulon_activity(V, X, X_TF, tf_idx, A_base, A_dict, mix, alpha=GRN_TILT_ALPHA, min_detect=GRN_TILT_MIN_DETECT,
+                     chunk=250):
+    """per-cell ridge fit of the displacement V_i on the cell's signed regulons L_i (expressed TFs, z units).
+    The per-cell Gram matrix is assembled from precomputed blocks of (A_base, A_1..A_D) weighted by (1, w_i).
+    Returns (a (N, T) TF activity velocity, 0 for unexpressed TFs; g (N, G) GRN-explained displacement;
+    R² (N,) GRN-explained fraction)."""
+    A_base, A_dict = A_base.copy(), A_dict.copy()
+    t = np.arange(A_base.shape[1]); A_base[tf_idx, t] = 0.0; A_dict[:, tf_idx, t] = 0.0     # no self-edges
+    sd = X.std(0); sg = np.maximum(sd, np.median(sd)) + 1e-8                                 # median-floored gene SD
+    sel = np.where((X_TF > 0).mean(0) >= min_detect)[0]
+    L = [A_base[:, sel] / sg[:, None]] + [A_dict[k][:, sel] / sg[:, None] for k in range(A_dict.shape[0])]
+    Wm = np.concatenate([np.ones((len(V), 1), np.float32), mix], 1)                          # L_i = Σ_j Wm[i, j] L[j]
+    Gab = np.stack([np.stack([La.T @ Lb for Lb in L]) for La in L])
+    rhs = np.stack([V @ La for La in L], 1)
+    a = np.zeros((len(V), len(sel)), np.float32); T = len(sel)
+    for s in range(0, len(V), chunk):
+        w = Wm[s:s + chunk]; Gi = np.einsum("na,nb,abst->nst", w, w, Gab, optimize=True)
+        lam = alpha * np.trace(Gi, axis1=1, axis2=2)[:, None, None] / T
+        a[s:s + chunk] = np.linalg.solve(Gi + lam * np.eye(T)[None], np.einsum("na,nat->nt", w, rhs[s:s + chunk])[..., None])[..., 0]
+    g = sum(Wm[:, j:j + 1] * (a @ L[j].T) for j in range(len(L))).astype(np.float32)
+    a_full = np.zeros((len(V), A_base.shape[1]), np.float32); a_full[:, sel] = a
+    return a_full, g, ((g * V).sum(1) / ((V * V).sum(1) + 1e-12)).astype(np.float32)
+
+
+def regulatory_consistency_tilt(b, V, A_base, A_dict, mix, S_mom, Z, lam=GRN_TILT_LAMBDA, k_local=TRAJ_K_LOCAL,
+                                verbose=True):
+    """V' = unit[V + λ κ ĝ]: lean each cell's displacement toward the part its own regulons explain. ĝ, κ come from the
+    chromatin lead's post-processing (tangent projection on the per-cell RNA~ manifold → forward cone along V →
+    k_local average → unit, coherence²), so the tilt never points backward and its angle to V is ≤ arctan λ.
+    Returns dict(V (tilted field), activity (N, T TF activity velocity), explained (N, GRN-explained fraction), kappa)."""
+    Z = np.asarray(Z, np.float32); V = _unit(V)
+    a, g, r2 = regulon_activity(V, b.X, b.X_TF, np.asarray(b.tf_indices_in_G), A_base, A_dict, mix)
+    Rt_cell = zscore_cols(np.asarray(S_mom @ b.X, np.float32))
+    c = tangent_project(g, Rt_cell, _knn(Z, k_local + 1)[:, 1:])
+    c = forward_cone(c, V)
+    nb = _knn(Z, k_local); c = c[nb].mean(1).astype(np.float32)
+    kappa = (coherence(c, nb) ** 2).astype(np.float32)
+    Vt = _unit(V + lam * kappa[:, None] * _unit(c))
+    if verbose:
+        ang = np.degrees(np.arccos(np.clip((Vt * V).sum(1), -1, 1)))
+        print(f"  regulatory-consistency tilt (λ={lam}): median GRN-explained fraction {np.median(r2):.3f}, "
+              f"median κ {np.median(kappa):.2f}, median gene-space turn {np.median(ang):.1f}°")
+    return dict(V=Vt, activity=a, explained=r2, kappa=kappa)

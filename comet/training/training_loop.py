@@ -9,12 +9,12 @@ from sklearn.decomposition import PCA
 from config import (
     D_ATOMS, N_EPOCHS, PHASE1_EPOCHS, BATCH_SIZE, GEO_TAU_SCALE,
     TARGET_CELLS_PER_EPOCH, TARGET_CELLS_PER_EPOCH_PHASE2, FORCE_RERUN, ORIGIN_SIGN,
-    STATE_SPACE, VEL_MOMENT_KNN, K_MOMENT, RANDOM_STATE, W1, W2, LD_HIDDEN, LR_GRN, TRAIN_GRN,
+    STATE_SPACE, VEL_MOMENT_KNN, K_MOMENT, RANDOM_STATE, W1, W2, LD_HIDDEN, LR_GRN, TRAIN_GRN, GRN_TILT_LAMBDA,
 )
 from utils.common import zscore_cols
 from utils.committor import moment_operator
 from utils.seed import set_seed
-from utils.trajectory import final_trajectory
+from utils.trajectory import final_trajectory, regulatory_consistency_tilt
 from model.grn import GRNDictionary, select_archetypes_fps, geometric_soft_targets, init_atoms_from_soft_targets
 from model.encoder import CellStateEncoder
 from model.ld_vae import LinearDecoder
@@ -158,7 +158,9 @@ def run_comet(b, out_dir, train=None):
     """Run COMET on one Bundle, save its arrays to out_dir and return a results dict.
 
     The trajectory (pseudotime q, root / sinks, velocity field V_pred) comes from utils/trajectory.final_trajectory
-    and involves no training. With train=True (default: config.TRAIN_GRN) the GRN dictionary is also trained.
+    and involves no training. With train=True (default: config.TRAIN_GRN) the GRN dictionary is also trained, and
+    (if config.GRN_TILT_LAMBDA > 0) V_pred becomes the regulatory-consistency-tilted field
+    (utils/trajectory.regulatory_consistency_tilt); the GRN-independent field is kept as V_pred_grn_independent.
     """
     os.makedirs(out_dir, exist_ok=True)
     train = TRAIN_GRN if train is None else bool(train)
@@ -167,6 +169,14 @@ def run_comet(b, out_dir, train=None):
         cached = _load_cached_run(out_dir, train)
         if cached is not None:
             print(f"\n::: {b.name} ::: found finished run in {out_dir} -> loading (set FORCE_RERUN=True to rerun).")
+            # a finished run from before the tilt: apply it to the saved GRN (nothing is retrained)
+            if train and GRN_TILT_LAMBDA > 0 and not os.path.exists(os.path.join(out_dir, "V_pred_grn_independent.npy")):
+                Zst = state_space(b); S_mom = moment_operator(Zst, int(VEL_MOMENT_KNN.get(b.name, K_MOMENT)))
+                A_base = np.load(os.path.join(out_dir, "A_base.npy"))
+                tilt = regulatory_consistency_tilt(b, cached["V_pred"], A_base, cached["A_dict"], cached["mix"], S_mom, Zst)
+                _save(out_dir, V_pred=tilt["V"], V_pred_grn_independent=cached["V_pred"],
+                      grn_activity_velocity=tilt["activity"], grn_explained_fraction=tilt["explained"])
+                cached["V_pred"] = tilt["V"]
             return cached
 
     set_seed()
@@ -177,7 +187,8 @@ def run_comet(b, out_dir, train=None):
           f"moment_knn={mknn}, train_grn={train})")
 
     # ---- trajectory ----
-    traj = final_trajectory(b, Zst, moment_operator(Zst, mknn), sign=sign)
+    S_mom = moment_operator(Zst, mknn)
+    traj = final_trajectory(b, Zst, S_mom, sign=sign)
     _save(out_dir, V_pred=traj["V"], committor_q=traj["q"], root_mask=traj["root_mask"], sink_mask=traj["sink_mask"],
           phi=traj["phi"], root_freq=traj["root_freq"], sink_freq=traj["sink_freq"], traj_u_bar=traj["u_bar"], traj_lead=traj["lead"],
           traj_w=traj["w"])
@@ -195,5 +206,10 @@ def run_comet(b, out_dir, train=None):
               steady_state=g["steady_state"], A_genes=b.A_genes, A_tfs=b.A_tfs, loss_history=g["loss_history"])
         out.update(grn=g["grn"], cell_encoder=g["cell_encoder"], mix=g["mix"], A_learned=g["A_learned"],
                    A_dict=g["A_dict"])
+        if GRN_TILT_LAMBDA > 0:
+            tilt = regulatory_consistency_tilt(b, traj["V"], g["A_base"], g["A_dict"], g["mix"], S_mom, Zst)
+            _save(out_dir, V_pred=tilt["V"], V_pred_grn_independent=traj["V"], grn_activity_velocity=tilt["activity"],
+                  grn_explained_fraction=tilt["explained"])
+            out["V_pred"] = tilt["V"]
     print(f"  saved -> {out_dir}")
     return out

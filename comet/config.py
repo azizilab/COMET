@@ -33,6 +33,11 @@ TRAJ_K_LOCAL       = 30        # neighbourhood for the lead's tangent / average 
 TRAJ_PLATEAU_Q     = 0.25      # committor plateau = cells whose local q-range is below this quantile
 TRAJ_LEAD_LAMBDA   = 2.0       # chromatin-lead weight on full plateaus
 TRAJ_COUPLING_MIN  = 0.10      # use the lead only if the median ATAC↔RNA per-gene coupling reaches this
+# regulatory-consistency tilt (utils/trajectory.py:regulatory_consistency_tilt), applied after GRN training:
+# V' = unit[V + λ κ ĝ], ĝ = the part of each cell's displacement explained by its own signed regulons. 0 = off.
+GRN_TILT_LAMBDA     = 0.5      # tilt strength (angle to the GRN-independent field ≤ arctan λ)
+GRN_TILT_ALPHA      = 0.1      # ridge of the per-cell regulon fit, relative to the mean diagonal of the cell's Gram matrix
+GRN_TILT_MIN_DETECT = 0.05     # TFs enter the fit if detected in ≥ this fraction of cells
 
 # origin assumption: +1 = the origin is the most open / highest-entropy chromatin (normal differentiation),
 #                    -1 = flipped (aml89: the least open chromatin is the origin)
