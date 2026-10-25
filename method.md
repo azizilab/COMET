@@ -100,10 +100,7 @@ The loader runs this at (40, 8) and then applies **kNN smoothing**: each row is 
 Decipher latent (`K_MOMENT = 15`). The result is `ga_matched` ∈ [0,1]^{N×G}. The raw `ga` is kept as
 `Bundle.ga_atac_cells` so the trajectory can rebuild the pseudo-bulk at other resolutions.
 
-Two per-gene / per-TF accessibility scores are derived from ga_matched for the GRN (§5):
-
-* gene_access_g = minmax_g( mean_i ga_matched_ig )
-* TF_access_t = minmax_t( mean_i ga_matched_{i, gene(t)} )
+The GRN's per-module target accessibility (§5.2) is derived from ga_matched.
 
 ## 3. Shared objects
 
@@ -283,8 +280,9 @@ giving h_i ∈ ℝ⁶⁴; then a head Linear(64, D) and π_i = softmax(head(h_i)
    Then W_raw = artanh(clip(W⁰, −0.95, 0.95)) and W_base = 0.
 4. **Encoder warm start**: 40 epochs of Adam (lr 10⁻³, batch 256, shuffled) minimizing KL(Q_i ‖ π_i), so the encoder
    starts out reproducing the geometric soft targets.
-5. **Accessibility buffers**: TF_access and gene_access from §2.4, and m̄ = mean_i |x̃_TF,i| ∈ ℝ^T (a typical TF input
-   magnitude, used by the diversity loss).
+5. **Per-module target accessibility**: for atom d, the soft-target-weighted mean gene activity
+   acc_dg = Σ_i Q_id ga_matched_ig / Σ_i Q_id, min-max scaled jointly over all (d, g) to [0, 1]. The fixed soft targets Q
+   are used rather than the learned π, so the encoder cannot move cells between atoms to avoid the penalty.
 
 ### 5.3 Losses (per minibatch B)
 
@@ -294,29 +292,22 @@ giving h_i ∈ ℝ⁶⁴; then a head Linear(64, D) and π_i = softmax(head(h_i)
 
   L_mask = mean over masked entries (i,g) of (x̂_ig(x̃'_TF) − x_ig)².
 * **Sparsity**: L_sparse = mean |A_d| + mean |A_base|.
-* **TF accessibility**: L_access = mean_{d,g,t} |A_dgt|(1 − TF_access_t) + mean_{g,t} |A_base,gt|(1 − TF_access_t).
-  TFs whose own locus is closed are discouraged from regulating.
-* **Target accessibility**: L_access_gene is the same with (1 − gene_access_g), so genes whose locus is closed are
-  discouraged from being regulated.
-* **Diversity** (keeps the atoms distinct). With E = the D × D matrix with zero diagonal and ones elsewhere:
-
-  L_div = ½ · mean( |Ĉ_param| ⊙ E ) + ½ · mean( |Ĉ_pred| ⊙ E ),
-
-  where Ĉ_param = the cosine-similarity matrix of the flattened A_d, Ĉ_pred = the cosine-similarity matrix of the vectors
-  A_d m̄ ∈ ℝ^G, and the mean runs over all D² entries.
+* **Target accessibility**: L_access_gene = mean_{d,g,t} |A_dgt|(1 − acc_dg) + mean_{g,t} |A_base,gt|(1 − max_d acc_dg),
+  so a gene whose locus is closed in a module is discouraged from being regulated by that module's atom, and by the
+  shared base only if it is closed in every module. This is the only accessibility term.
 * **Anchor**: L_anchor = mean_i KL(Q_i ‖ π_i), multiplied by α(e) = max(0.2, 1 − 0.8 e / N_EPOCHS) at epoch e, so the
   geometric targets are relaxed over training.
 * **Linear decoder**: L_LD = mean ‖x̂^LD_i − x_i‖², and L_LDreg = −mean_k log(Var_B(e_k) + 10⁻⁴) + 2 Cov_B(e₁, e₂)².
 
 Total loss:
 
-  L = w_MASK L_mask + w_SPARSE L_sparse + w_ACCESS L_access + w_ACCESS_GENE L_access_gene + w_DIVERSE L_div
+  L = w_MASK L_mask + w_SPARSE L_sparse + w_ACCESS_GENE L_access_gene
       + w_ANCHOR α(e) L_anchor + w_LD L_LD + w_LD_REG L_LDreg
 
-| weight | MASK | SPARSE | ACCESS | ACCESS_GENE | DIVERSE | ANCHOR | LD | LD_REG |
-|---|---|---|---|---|---|---|---|---|
-| phase 1 (`W1`, epochs 0–39) | 2.0 | 5e−3 | 0.1 | 0.1 | 10.0 | 1.0 | 0.5 | 0.1 |
-| phase 2 (`W2`, epochs 40–79) | 1.0 | 5e−3 | 0.1 | 0.1 | 5.0 | 0.5 | 0.3 | 0.05 |
+| weight | MASK | SPARSE | ACCESS_GENE | ANCHOR | LD | LD_REG |
+|---|---|---|---|---|---|---|
+| phase 1 (`W1`, epochs 0–39) | 2.0 | 5e−3 | 0.1 | 1.0 | 0.5 | 0.1 |
+| phase 2 (`W2`, epochs 40–79) | 1.0 | 5e−3 | 0.1 | 0.5 | 0.3 | 0.05 |
 
 ### 5.4 Optimization
 

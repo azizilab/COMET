@@ -38,6 +38,8 @@ TRAJ_COUPLING_MIN  = 0.10      # use the lead only if the median ATAC↔RNA per-
 GRN_TILT_LAMBDA     = 0.5      # tilt strength (angle to the GRN-independent field ≤ arctan λ)
 GRN_TILT_ALPHA      = 0.1      # ridge of the per-cell regulon fit, relative to the mean diagonal of the cell's Gram matrix
 GRN_TILT_MIN_DETECT = 0.05     # TFs enter the fit if detected in ≥ this fraction of cells
+GRN_PRUNE_FRAC      = 0.1      # the tilt sees only the top fraction (by |weight|) of each module's edges (A_base and
+                               # each atom separately); the saved GRN stays dense. None or 1.0 = no pruning
 
 # origin assumption: +1 = the origin is the most open / highest-entropy chromatin (normal differentiation),
 #                    -1 = flipped (aml89: the least open chromatin is the origin)
@@ -72,5 +74,5 @@ TARGET_CELLS_PER_EPOCH        = 2048
 TARGET_CELLS_PER_EPOCH_PHASE2 = 16384
 FORCE_RERUN = False         # rerun even if a finished run exists in the output dir
 
-W1 = dict(MASK=2.0, SPARSE=5e-3, ACCESS=0.1, ACCESS_GENE=0.1, DIVERSE=10.0, ANCHOR=1.0, LD=0.5, LD_REG=0.1)
-W2 = dict(MASK=1.0, SPARSE=5e-3, ACCESS=0.1, ACCESS_GENE=0.1, DIVERSE=5.0, ANCHOR=0.5, LD=0.3, LD_REG=0.05)
+W1 = dict(MASK=2.0, SPARSE=5e-3, ACCESS_GENE=0.1, ANCHOR=1.0, LD=0.5, LD_REG=0.1)
+W2 = dict(MASK=1.0, SPARSE=5e-3, ACCESS_GENE=0.1, ANCHOR=0.5, LD=0.3, LD_REG=0.05)

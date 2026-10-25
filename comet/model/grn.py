@@ -2,7 +2,6 @@ import numpy as np
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 def select_archetypes_fps(Z, D, seed=0):
@@ -48,9 +47,7 @@ class GRNDictionary(nn.Module):
         self.W_raw  = nn.Parameter(torch.zeros(D, G, T))   # residual atoms
         self.W_base = nn.Parameter(torch.zeros(G, T))      # shared base
         self.register_buffer("M", torch.tensor(M, dtype=torch.float32))
-        self.register_buffer("TF_access", torch.zeros(T))
-        self.register_buffer("Gene_access", torch.zeros(G))
-        self.register_buffer("mean_tf",  torch.zeros(T))
+        self.register_buffer("Gene_access", torch.zeros(D, G))   # per-module target accessibility
 
     def init_from_atoms(self, W_init):
         with torch.no_grad():
@@ -75,25 +72,12 @@ class GRNDictionary(nn.Module):
     def sparsity_loss(self):
         return torch.abs(self.A_dict).mean() + torch.abs(self.A_base).mean()
 
-    def diversity_loss(self):
-        A_flat = self.A_dict.reshape(self.D, -1); A_norm = F.normalize(A_flat, dim=1)
-        eye = torch.eye(self.D, device=A_flat.device)
-        param_div = ((A_norm @ A_norm.T) * (1 - eye)).abs().mean()
-        pred = torch.einsum('dgt,t->dg', self.A_dict, self.mean_tf); pred = F.normalize(pred, dim=1)
-        pred_div = ((pred @ pred.T) * (1 - eye)).abs().mean()
-        return 0.5 * param_div + 0.5 * pred_div
-
-    def tf_access_consistency_loss(self):
-        closed = 1.0 - self.TF_access.clamp(0, 1)
-        dict_term = (torch.abs(self.A_dict) * closed.unsqueeze(0).unsqueeze(0)).mean()
-        base_term = (torch.abs(self.A_base) * closed).mean()
-        return dict_term + base_term
-
     def gene_access_consistency_loss(self):
-        """Same idea as tf_access_consistency_loss, but gates by the TARGET gene's own
-        chromatin accessibility instead of the regulating TF's -- an independent term (not
-        multiplied with the TF-side one), scaling whole rows rather than whole columns."""
-        closed = 1.0 - self.Gene_access.clamp(0, 1)
-        dict_term = (torch.abs(self.A_dict) * closed.view(1, -1, 1)).mean()
-        base_term = (torch.abs(self.A_base) * closed.unsqueeze(1)).mean()
+        """Penalise edges into target genes whose own locus is closed: |weight| scaled by the
+        TARGET gene's chromatin inaccessibility (whole rows of A). The only accessibility term.
+        Atom d uses its own module's accessibility; the shared base counts a gene as closed only
+        if it is closed in every module (its most open module)."""
+        closed = 1.0 - self.Gene_access.clamp(0, 1)                                  # (D, G)
+        dict_term = (torch.abs(self.A_dict) * closed.unsqueeze(-1)).mean()
+        base_term = (torch.abs(self.A_base) * closed.min(0).values.unsqueeze(1)).mean()
         return dict_term + base_term

@@ -63,13 +63,12 @@ def train_grn(b, Zst):
     arch_idx = select_archetypes_fps(Zst, D_ATOMS, seed=0)
     q_target = geometric_soft_targets(Zst, arch_idx, tau_scale=GEO_TAU_SCALE)
 
-    # ---- ATAC accessibility priors ----
+    # ---- ATAC accessibility prior (target gene's own locus), per module ----
+    # atom d: gene activity averaged over cells weighted by its geometric soft target; all atoms scaled jointly to [0, 1]
     G, T = b.G, b.T
-    TF_access = np.zeros(T, np.float32)
-    for i, tf in enumerate(b.A_tfs):
-        if tf in b.sub_g2i: TF_access[i] = float(b.ga_matched[:, b.sub_g2i[tf]].mean())
-    lo, hi = TF_access.min(), TF_access.max(); TF_access = (TF_access - lo) / (hi - lo + 1e-8)
-    gene_access_t = torch.tensor(b.gene_access, dtype=torch.float32)
+    gene_access = (q_target.T @ b.ga_matched) / (q_target.sum(0)[:, None] + 1e-8)          # (D, G)
+    gene_access = (gene_access - gene_access.min()) / (gene_access.max() - gene_access.min() + 1e-8)
+    gene_access_t = torch.tensor(gene_access, dtype=torch.float32)
 
     # ---- tensors + loader ----
     # TF inputs are standardised so a GRN weight is "RNA per SD of TF" (comparable across TFs); in raw units
@@ -86,9 +85,7 @@ def train_grn(b, Zst):
 
     # ---- models ----
     grn = GRNDictionary(G=G, T=T, M=b.M, D=D_ATOMS)
-    grn.TF_access = torch.tensor(TF_access, dtype=torch.float32); grn.Gene_access = gene_access_t.clone()
-    # positive, typical-magnitude TF input for diversity_loss (the standardised X_TF has mean 0)
-    grn.mean_tf = torch.tensor(np.abs(X_TF).mean(0), dtype=torch.float32)
+    grn.Gene_access = gene_access_t.clone()
     grn.init_from_atoms(init_atoms_from_soft_targets(b.X, q_target, b.M, b.A_tfs))
     cell_encoder = CellStateEncoder(G=G, D=D_ATOMS); cell_encoder.init_from_soft_targets(b.X, q_target, n_epochs=40)
     assert LD_HIDDEN == cell_encoder.h_out, f"config.LD_HIDDEN={LD_HIDDEN} must equal {cell_encoder.h_out}"
@@ -126,9 +123,8 @@ def train_grn(b, Zst):
             l_anchor = (q_b * (torch.log(q_b + 1e-8) - torch.log(mix + 1e-8))).sum(1).mean()
             h_b = cell_encoder.encoder(rna_b)
             loss_grn = (Wt['MASK'] * l_mask + Wt['SPARSE'] * grn.sparsity_loss() +
-                        Wt['ACCESS'] * grn.tf_access_consistency_loss() +
                         Wt['ACCESS_GENE'] * grn.gene_access_consistency_loss() +
-                        Wt['DIVERSE'] * grn.diversity_loss() + Wt['ANCHOR'] * anchor_scale * l_anchor +
+                        Wt['ANCHOR'] * anchor_scale * l_anchor +
                         Wt['LD'] * ld_decoder.reconstruction_loss(h_b, rna_b) +
                         Wt['LD_REG'] * ld_decoder.ld_regularization_loss(h_b))
 

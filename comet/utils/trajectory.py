@@ -18,7 +18,8 @@ trajectory_benchmarking/final_method_writeup.md. This module reproduces final_tr
 
 Nothing in final_trajectory is trained and no labels are used. After the GRN is trained, run_comet applies the
 regulatory-consistency tilt (regulatory_consistency_tilt below):
-    regulons      L_i = (A_base + Σ_k w_ik A_k)[:, expressed TFs] / σ   (self-edges removed; σ = gene SD, median-floored)
+    regulons      L_i = (A_base + Σ_k w_ik A_k)[:, expressed TFs] / σ   (self-edges removed; each module pruned to its
+                  top GRN_PRUNE_FRAC by |weight|; σ = gene SD, median-floored)
     activity      a_i = (L_iᵀL_i + α_i I)⁻¹ L_iᵀ V_i                    TF activity velocity
     explained     g_i = L_i a_i,  R²_i = <g_i, V_i> / ||V_i||²
     tilt          ĝ, κ = tangent projection → forward cone along V → k_local average → (unit, coherence²)
@@ -33,7 +34,7 @@ from sklearn.preprocessing import normalize as sk_normalize
 from config import (
     K_MOMENT, COMMIT_GRAPH_K, COMMIT_SINK_FRAC, TRAJ_ATAC_RES, TRAJ_ROOT_FRAC,
     TRAJ_N_SEEDS, TRAJ_K_LOCAL, TRAJ_PLATEAU_Q, TRAJ_LEAD_LAMBDA, TRAJ_COUPLING_MIN,
-    GRN_TILT_LAMBDA, GRN_TILT_ALPHA, GRN_TILT_MIN_DETECT,
+    GRN_TILT_LAMBDA, GRN_TILT_ALPHA, GRN_TILT_MIN_DETECT, GRN_PRUNE_FRAC,
 )
 from utils.common import zsc, zscore_cols, knn_smooth
 from utils.geometry import build_local_atac
@@ -236,14 +237,29 @@ def final_trajectory(b, Z, S_mom, sign=1.0, k_graph=COMMIT_GRAPH_K, k_local=TRAJ
 # ---------------------------------------------------------------------------------------------------------------------
 # regulatory-consistency tilt (applied after GRN training)
 # ---------------------------------------------------------------------------------------------------------------------
+def prune_top_frac(W, frac):
+    """W with all but its strongest `frac` of nonzero entries (by |weight|) zeroed; ties at the cutoff are kept.
+    None or frac >= 1 returns W unchanged."""
+    if frac is None or frac >= 1.0:
+        return W
+    a = np.abs(W); nz = a[a > 0]
+    if nz.size == 0:
+        return W
+    k = max(1, int(round(nz.size * frac)))
+    return W * (a >= np.partition(nz, nz.size - k)[nz.size - k])
+
+
 def regulon_activity(V, X, X_TF, tf_idx, A_base, A_dict, mix, alpha=GRN_TILT_ALPHA, min_detect=GRN_TILT_MIN_DETECT,
-                     chunk=250):
+                     prune_frac=GRN_PRUNE_FRAC, chunk=250):
     """per-cell ridge fit of the displacement V_i on the cell's signed regulons L_i (expressed TFs, z units).
+    A_base and each atom are first pruned to their own top prune_frac of edges (prune_top_frac).
     The per-cell Gram matrix is assembled from precomputed blocks of (A_base, A_1..A_D) weighted by (1, w_i).
     Returns (a (N, T) TF activity velocity, 0 for unexpressed TFs; g (N, G) GRN-explained displacement;
     R² (N,) GRN-explained fraction)."""
     A_base, A_dict = A_base.copy(), A_dict.copy()
     t = np.arange(A_base.shape[1]); A_base[tf_idx, t] = 0.0; A_dict[:, tf_idx, t] = 0.0     # no self-edges
+    A_base = prune_top_frac(A_base, prune_frac)
+    A_dict = np.stack([prune_top_frac(A_k, prune_frac) for A_k in A_dict])
     sd = X.std(0); sg = np.maximum(sd, np.median(sd)) + 1e-8                                 # median-floored gene SD
     sel = np.where((X_TF > 0).mean(0) >= min_detect)[0]
     L = [A_base[:, sel] / sg[:, None]] + [A_dict[k][:, sel] / sg[:, None] for k in range(A_dict.shape[0])]
@@ -276,6 +292,7 @@ def regulatory_consistency_tilt(b, V, A_base, A_dict, mix, S_mom, Z, lam=GRN_TIL
     Vt = _unit(V + lam * kappa[:, None] * _unit(c))
     if verbose:
         ang = np.degrees(np.arccos(np.clip((Vt * V).sum(1), -1, 1)))
-        print(f"  regulatory-consistency tilt (λ={lam}): median GRN-explained fraction {np.median(r2):.3f}, "
+        print(f"  regulatory-consistency tilt (λ={lam}, prune_frac={GRN_PRUNE_FRAC}): "
+              f"median GRN-explained fraction {np.median(r2):.3f}, "
               f"median κ {np.median(kappa):.2f}, median gene-space turn {np.median(ang):.1f}°")
     return dict(V=Vt, activity=a, explained=r2, kappa=kappa)
