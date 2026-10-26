@@ -4,9 +4,8 @@ Self-contained copy of recomb_bench/pipelines/new_metrics.py (code depends on no
 reads data and caches from the absolute paths below).
 
 COMET's field is the FULL COMET field: committor direction + chromatin lead (utils/trajectory.final_trajectory;
-results_final/<ds>/V_pred.npy; the lead's ATAC-RNA gate is off on aml89 and ma2020, as in COMET itself) + the
-regulatory-consistency GRN tilt (utils/trajectory.regulatory_consistency_tilt, λ = 0.5, from the saved GRN; computed
-by grn_displacement/scripts/run_final.py as V_A in grn_displacement/tables_final/cache_<ds>.npz; nothing retrained).
+the lead's ATAC-RNA gate is off on aml89 and ma2020, as in COMET itself) + the regulatory-consistency GRN tilt
+(utils/trajectory.regulatory_consistency_tilt, λ = 0.5), all as saved by train.py in RF/<ds>/V_pred.npy.
 
 Metrics
   forward transport   every method's gene-space velocity -> P_ij ∝ exp(β cos(v_i, x_j − x_i)) on a shared kNN graph,
@@ -33,8 +32,9 @@ from sklearn.neighbors import NearestNeighbors
 
 RB = "/home/sc5625/cll_project/decipher_atac_project/COMET/trajectory_benchmarking/recomb_bench"
 TB = os.path.dirname(RB); BD = "/home/sc5625/cll_project/decipher_atac_project/benchmark_data"
-RF = "/home/sc5625/cll_project/decipher_atac_project/COMET/comet/results_final"
-TILT = f"{TB}/grn_displacement/tables_final"
+# COMET run to benchmark: train.py --out-dir results_final_merge (final-merge branch: GRN with per-module target
+# access prior, top-10% edge pruning in the tilt). V_pred.npy there already includes the GRN tilt.
+RF = "/home/sc5625/cll_project/decipher_atac_project/COMET/comet/results_final_merge"
 VEL_CACHE = f"{RB}/results_new_metrics/per_cell"          # each method's gene-space velocity (built once)
 
 K_NN, BETA, W_CONN, K_STEPS = 30, 10.0, 0.2, 30
@@ -265,8 +265,10 @@ def scvelo_velocity(ds, obs_index):
 
 
 def comet_field(ds, base):
-    """full COMET field (committor + chromatin lead + GRN tilt), unit per cell, in z-scored gene units"""
-    c = np.load(f"{TILT}/cache_{ds}.npz")["V_A"].astype(np.float32)
+    """full COMET field (committor + chromatin lead + GRN tilt), unit per cell, in z-scored gene units: the run's
+    V_pred.npy, which run_comet tilts after GRN training (the GRN-free field is V_pred_grn_independent.npy)"""
+    assert os.path.exists(f"{RF}/{ds}/V_pred_grn_independent.npy"), f"{RF}/{ds}: V_pred is not the GRN-tilted field"
+    c = np.load(f"{RF}/{ds}/V_pred.npy").astype(np.float32)
     assert c.shape == base["V_pred"].shape
     return c
 
