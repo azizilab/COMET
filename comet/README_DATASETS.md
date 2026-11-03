@@ -168,7 +168,7 @@ degrades the trajectory):
 **Safe to leave at defaults for a first run** (these aren't exposed via `--new-dataset`; edit
 `config.py` directly if you need to revisit them): the trajectory settings `TRAJ_*`, `COMMIT_SINK_FRAC`,
 `COMMIT_GRAPH_K` (see the top-level `README.md`), the GRN training settings `D_ATOMS`, `N_EPOCHS`,
-`PHASE1_EPOCHS`, `BATCH_SIZE`, `GEO_TAU_SCALE`, `LD_HIDDEN`, `LR_GRN`, `TARGET_CELLS_PER_EPOCH(_PHASE2)`, `W1`,
+`PHASE1_EPOCHS`, `BATCH_SIZE`, `GEO_TAU_SCALE`, `LR_GRN`, `TARGET_CELLS_PER_EPOCH(_PHASE2)`, `W1`,
 `W2`, and the data settings `N_TOP_HVG`, `K_MOMENT`.
 
 ---

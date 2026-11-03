@@ -9,7 +9,7 @@ from sklearn.decomposition import PCA
 from config import (
     D_ATOMS, N_EPOCHS, PHASE1_EPOCHS, BATCH_SIZE, GEO_TAU_SCALE,
     TARGET_CELLS_PER_EPOCH, TARGET_CELLS_PER_EPOCH_PHASE2, FORCE_RERUN, ORIGIN_SIGN,
-    STATE_SPACE, VEL_MOMENT_KNN, K_MOMENT, RANDOM_STATE, W1, W2, LD_HIDDEN, LR_GRN, TRAIN_GRN, GRN_TILT_LAMBDA,
+    STATE_SPACE, VEL_MOMENT_KNN, K_MOMENT, RANDOM_STATE, W1, W2, LR_GRN, TRAIN_GRN, GRN_TILT_LAMBDA,
 )
 from utils.common import zscore_cols
 from utils.committor import moment_operator
@@ -17,8 +17,7 @@ from utils.seed import set_seed
 from utils.trajectory import final_trajectory, regulatory_consistency_tilt
 from model.grn import GRNDictionary, select_archetypes_fps, geometric_soft_targets, init_atoms_from_soft_targets
 from model.encoder import CellStateEncoder
-from model.ld_vae import LinearDecoder
-from losses.losses import masked_reconstruction_loss
+from losses.losses import masked_reconstruction_loss, sample_gene_mask
 
 _TRAJ_FILES = ["V_pred.npy", "committor_q.npy", "root_mask.npy", "sink_mask.npy", "phi.npy",
                "traj_lead.npy", "traj_w.npy"]
@@ -88,10 +87,8 @@ def train_grn(b, Zst):
     grn.Gene_access = gene_access_t.clone()
     grn.init_from_atoms(init_atoms_from_soft_targets(b.X, q_target, b.M, b.A_tfs))
     cell_encoder = CellStateEncoder(G=G, D=D_ATOMS); cell_encoder.init_from_soft_targets(b.X, q_target, n_epochs=40)
-    assert LD_HIDDEN == cell_encoder.h_out, f"config.LD_HIDDEN={LD_HIDDEN} must equal {cell_encoder.h_out}"
-    ld_decoder = LinearDecoder(hidden=LD_HIDDEN, G=G, ld_dim=2)
 
-    grn_params = list(grn.parameters()) + list(cell_encoder.parameters()) + list(ld_decoder.parameters())
+    grn_params = list(grn.parameters()) + list(cell_encoder.parameters())
     opt_grn = torch.optim.AdamW(grn_params, lr=LR_GRN)
     sch_grn = torch.optim.lr_scheduler.CosineAnnealingLR(opt_grn, T_max=N_EPOCHS, eta_min=1e-5)
 
@@ -117,16 +114,15 @@ def train_grn(b, Zst):
         epoch_losses = []
         for step, (rna_b, tf_b, bidx) in enumerate(loader):
             if step >= steps_per_epoch: break
-            mix = cell_encoder(rna_b, temperature=1.0)
-            l_mask = masked_reconstruction_loss(grn, mix, rna_b, tf_b, tf_indices_in_G, 0.40)
+            # the encoder sees the masked profile, so the mixing weights cannot carry a masked target (no leakage)
+            mask = sample_gene_mask(rna_b, 0.40)
+            mix = cell_encoder(rna_b * (~mask).float(), temperature=1.0)
+            l_mask = masked_reconstruction_loss(grn, mix, rna_b, tf_b, tf_indices_in_G, mask)
             q_b = q_t[bidx]
             l_anchor = (q_b * (torch.log(q_b + 1e-8) - torch.log(mix + 1e-8))).sum(1).mean()
-            h_b = cell_encoder.encoder(rna_b)
             loss_grn = (Wt['MASK'] * l_mask + Wt['SPARSE'] * grn.sparsity_loss() +
                         Wt['ACCESS_GENE'] * grn.gene_access_consistency_loss() +
-                        Wt['ANCHOR'] * anchor_scale * l_anchor +
-                        Wt['LD'] * ld_decoder.reconstruction_loss(h_b, rna_b) +
-                        Wt['LD_REG'] * ld_decoder.ld_regularization_loss(h_b))
+                        Wt['ANCHOR'] * anchor_scale * l_anchor)
 
             opt_grn.zero_grad(); loss_grn.backward()
             torch.nn.utils.clip_grad_norm_(grn_params, 1.0)

@@ -32,9 +32,11 @@ from sklearn.neighbors import NearestNeighbors
 
 RB = "/home/sc5625/cll_project/decipher_atac_project/COMET/trajectory_benchmarking/recomb_bench"
 TB = os.path.dirname(RB); BD = "/home/sc5625/cll_project/decipher_atac_project/benchmark_data"
-# COMET run to benchmark: train.py --out-dir results_final_merge (final-merge branch: GRN with per-module target
-# access prior, top-10% edge pruning in the tilt). V_pred.npy there already includes the GRN tilt.
-RF = "/home/sc5625/cll_project/decipher_atac_project/COMET/comet/results_final_merge"
+# COMET run to benchmark: train.py --out-dir comet_outputs_post_review (post-review: no linear decoder, leak-free
+# encoder, no coherence scaling of the lead; per-module target access prior, top-10% edge pruning in the tilt).
+# V_pred.npy there already includes the GRN tilt.
+RF = os.environ.get("COMET_RUN", "/home/sc5625/cll_project/decipher_atac_project/COMET/comet/comet_outputs_post_review")
+# previous run: .../comet/results_final_merge (set COMET_RUN to it to reproduce the pre-review figures)
 VEL_CACHE = f"{RB}/results_new_metrics/per_cell"          # each method's gene-space velocity (built once)
 
 K_NN, BETA, W_CONN, K_STEPS = 30, 10.0, 0.2, 30

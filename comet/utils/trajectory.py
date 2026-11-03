@@ -12,7 +12,7 @@ trajectory_benchmarking/final_method_writeup.md. This module reproduces final_tr
     pseudotime    harmonic committor q (0 at the root, 1 at the sinks)
     direction     u = committor_gene_direction(q), smoothed over k_local neighbours -> u_bar
     lead          offset-free residual rho·(A~ − rho·R~) at matched pseudo-bulk resolution -> tangent projection
-                  -> forward cone (no component back toward the root) -> k_local average -> × coherence²
+                  -> forward cone (no component back toward the root) -> k_local average
     velocity      V = unit[(1 − w) u_bar + λ w c_hat],  w = g·(1 − min(1, Δq / P_plateau(Δq))),
                   g = 1[median ATAC↔RNA coupling ≥ coupling_min]
 
@@ -183,7 +183,7 @@ def coherence(V, nbr_idx):
 
 def chromatin_lead(b, S_mom, Z, outward=None, k_local=TRAJ_K_LOCAL, A=None, R=None):
     """residual -> tangent projection (per-cell RNA~ manifold) -> [forward cone along `outward`] -> k_local average
-    -> × coherence². Pass A/R to run the identical pipeline on other inputs (e.g. a shuffled-ATAC null)."""
+    (enters the field only through its direction). Pass A/R to run the identical pipeline on other inputs (e.g. a shuffled-ATAC null)."""
     if A is None or R is None:
         A, R, _ = matched_pseudobulk(b, S_mom)
     c, corr = residual_lead(A, R)
@@ -194,7 +194,6 @@ def chromatin_lead(b, S_mom, Z, outward=None, k_local=TRAJ_K_LOCAL, A=None, R=No
         c = forward_cone(c, outward)
     nb = _knn(Z, k_local)
     c = c[nb].mean(1).astype(np.float32)
-    c = (c * coherence(c, nb)[:, None] ** 2).astype(np.float32)
     return c, corr
 
 
@@ -280,7 +279,7 @@ def regulatory_consistency_tilt(b, V, A_base, A_dict, mix, S_mom, Z, lam=GRN_TIL
                                 verbose=True):
     """V' = unit[V + λ κ ĝ]: lean each cell's displacement toward the part its own regulons explain. ĝ, κ come from the
     chromatin lead's post-processing (tangent projection on the per-cell RNA~ manifold → forward cone along V →
-    k_local average → unit, coherence²), so the tilt never points backward and its angle to V is ≤ arctan λ.
+    k_local average → unit, coherence²), so the tilt never points backward and its angle to V is ≤ arcsin λ (≤ 30° at λ = 0.5).
     Returns dict(V (tilted field), activity (N, T TF activity velocity), explained (N, GRN-explained fraction), kappa)."""
     Z = np.asarray(Z, np.float32); V = _unit(V)
     a, g, r2 = regulon_activity(V, b.X, b.X_TF, np.asarray(b.tf_indices_in_G), A_base, A_dict, mix)

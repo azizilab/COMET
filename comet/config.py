@@ -67,12 +67,11 @@ N_EPOCHS      = 80
 PHASE1_EPOCHS = 40          # phase 1 / phase 2 use the loss weights W1 / W2
 BATCH_SIZE    = 512
 GEO_TAU_SCALE = 0.5         # smaller -> sharper geometric mixing targets
-LD_HIDDEN     = 64          # must equal CellStateEncoder.h_out
-LR_GRN        = 5e-4        # grn + cell_encoder + ld_decoder
+LR_GRN        = 5e-4        # grn + cell_encoder
 # minibatches per epoch are capped so epoch cost does not grow with #cells (None = all cells)
 TARGET_CELLS_PER_EPOCH        = 2048
 TARGET_CELLS_PER_EPOCH_PHASE2 = 16384
 FORCE_RERUN = False         # rerun even if a finished run exists in the output dir
 
-W1 = dict(MASK=2.0, SPARSE=5e-3, ACCESS_GENE=0.1, ANCHOR=1.0, LD=0.5, LD_REG=0.1)
-W2 = dict(MASK=1.0, SPARSE=5e-3, ACCESS_GENE=0.1, ANCHOR=0.5, LD=0.3, LD_REG=0.05)
+W1 = dict(MASK=2.0, SPARSE=5e-3, ACCESS_GENE=0.1, ANCHOR=1.0)
+W2 = dict(MASK=1.0, SPARSE=5e-3, ACCESS_GENE=0.1, ANCHOR=0.5)
