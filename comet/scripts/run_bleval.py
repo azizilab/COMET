@@ -19,7 +19,7 @@ Top-N ranking comes from BEELINE's GeneOrdering.csv (--gene-ordering).
 
 SIMPLE ONE-COMMAND USAGE
 ------------------------
-  python scripts/run_bleval.py --run /home/elicanter/<output_dir> --panel 1000
+  python scripts/run_bleval.py --run comet_out_trajectory_final/<dataset> --panel 1000
 
   # add --grn learned|base|mixture (default learned)
   # add --label COSMOS  (name shown in the figure; default COSMOS)
@@ -38,16 +38,17 @@ import numpy as np
 import pandas as pd
 import yaml
 
-NET_DIR = "/home/elicanter/datasets/_beeline_raw/networks/Networks/mouse"
+# BEELINE reference data (networks/ and BEELINE-data/ from https://github.com/Murali-group/Beeline):
+# $BEELINE_DATA, or <repo>/datasets/_beeline_raw by default.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BEELINE_DATA = os.environ.get("BEELINE_DATA", os.path.join(REPO_ROOT, "datasets", "_beeline_raw"))
+NET_DIR = os.path.join(BEELINE_DATA, "networks", "Networks", "mouse")
 NETWORKS = {
     "mHSC-ChIP-seq": "mHSC-ChIP-seq-network.csv",
     "Non-Specific-ChIP": "Non-Specific-ChIP-seq-network.csv",
     "STRING": "STRING-network.csv",
 }
-DEFAULT_GENE_ORDERING = (
-    "/home/elicanter/datasets/_beeline_raw/BEELINE-data/"
-    "inputs/scRNA-Seq/mHSC-E/GeneOrdering.csv"
-)
+DEFAULT_GENE_ORDERING = os.path.join(BEELINE_DATA, "BEELINE-data", "inputs", "scRNA-Seq", "mHSC-E", "GeneOrdering.csv")
 
 
 def load_grn(run_dir, which):
@@ -147,10 +148,13 @@ def main():
     ap.add_argument("--panel", type=int, default=0,
                     help="0=full universe; 500/1000=all TFs + top-N varying genes")
     ap.add_argument("--gene-ordering", default=DEFAULT_GENE_ORDERING)
-    ap.add_argument("--beeline-repo", default="/home/elicanter/Git/Beeline")
+    ap.add_argument("--beeline-repo", default=os.environ.get("BEELINE_REPO"),
+                    help="checkout of https://github.com/Murali-group/Beeline (default: $BEELINE_REPO)")
     ap.add_argument("--net-dir", default=NET_DIR)
     ap.add_argument("--workdir", default=None, help="default <run>/bleval")
     args = ap.parse_args()
+    if not args.beeline_repo:
+        ap.error("--beeline-repo (or $BEELINE_REPO) is required")
 
     label = args.label
     workdir = os.path.abspath(args.workdir or os.path.join(args.run, "bleval"))

@@ -10,10 +10,12 @@
 #
 # Run build_paul15_universe.py first to generate atac_peak_index_map.tsv
 # and atac_matrix.trimmed.peaks.txt.
+#
+# Usage: bash trim_paul15_atac.sh DIR   (DIR holds the raw matrix and the index map; output is written there)
 
 set -euo pipefail
 
-DIR="/home/elicanter/datasets/paul2015data"
+DIR="${1:?usage: trim_paul15_atac.sh DIR}"
 RAW_MTX="$DIR/atac_matrix.binary.qc_filtered.mtx.gz"
 MAP="$DIR/atac_peak_index_map.tsv"
 BODY="$DIR/.atac_trimmed_body.tmp"

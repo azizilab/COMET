@@ -48,7 +48,7 @@ three: a method whose score only survives at 'none' is reporting an artifact.
 
 USAGE
 -----
-  python scripts/run_bleval2.py --run /home/elicanter/<output_dir>
+  python scripts/run_bleval2.py --run comet_out_trajectory_final/<dataset>
   python scripts/run_bleval2.py --run <dir> --panel 1000 --normalize tf-z
   python scripts/run_bleval2.py --run <dir> --all-normalizations   # side by side
 
@@ -65,16 +65,17 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-NET_DIR = "/home/elicanter/datasets/_beeline_raw/networks/Networks/mouse"
+# BEELINE reference data (networks/ and BEELINE-data/ from https://github.com/Murali-group/Beeline):
+# $BEELINE_DATA, or <repo>/datasets/_beeline_raw by default.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BEELINE_DATA = os.environ.get("BEELINE_DATA", os.path.join(REPO_ROOT, "datasets", "_beeline_raw"))
+NET_DIR = os.path.join(BEELINE_DATA, "networks", "Networks", "mouse")
 NETWORKS = {
     "mHSC-ChIP-seq": "mHSC-ChIP-seq-network.csv",
     "Non-Specific-ChIP": "Non-Specific-ChIP-seq-network.csv",
     "STRING": "STRING-network.csv",
 }
-DEFAULT_GENE_ORDERING = (
-    "/home/elicanter/datasets/_beeline_raw/BEELINE-data/"
-    "inputs/scRNA-Seq/mHSC-E/GeneOrdering.csv"
-)
+DEFAULT_GENE_ORDERING = os.path.join(BEELINE_DATA, "BEELINE-data", "inputs", "scRNA-Seq", "mHSC-E", "GeneOrdering.csv")
 NORMALIZATIONS = ("none", "tf-z", "tf-gene-z")
 
 

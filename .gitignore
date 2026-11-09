@@ -42,3 +42,6 @@ cell_oracle_run/*.links
 
 # ---- Virtual Python Environments ----
 .venv/
+
+# ---- External datasets (config.DATA_ROOT) ----
+datasets/

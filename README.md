@@ -35,7 +35,15 @@ is in [`method.md`](method.md). The development history and validation results a
 pip install -r requirements.txt
 ```
 
-`generate_priors.py` (needed only to build a GRN prior for a new dataset) also needs `celloracle` and `genomepy`.
+`generate_priors.py` (needed only to build a GRN prior for a new dataset) also needs `celloracle` and `genomepy`;
+`scripts/run_bleval.py` needs `pyyaml` and `scripts/build_nestorowa.py` needs `mygene`.
+
+## Data
+
+`paul15` ships with the repo in `paul2015data_clean/` (stored with [Git LFS](https://git-lfs.com); run
+`git lfs install` before cloning, or `git lfs pull` after). The other built-in datasets are not included: put each
+in `datasets/<name>/` at the repo root, or set `COMET_DATA_ROOT` to the directory that holds them. The files each
+loader expects are in `comet/data/load.py`.
 
 ## Running
 
@@ -45,20 +53,20 @@ All commands run from `comet/`:
 cd comet
 
 # trajectory only (pseudotime + velocity field), a few minutes per dataset
-python train.py --datasets hema aml89 paul15 --trajectory-only
+python train.py --datasets paul15 --trajectory-only
 
 # trajectory + GRN dictionary training
-python train.py --datasets hema
+python train.py --datasets paul15
 
-# no --datasets: runs config.RUN_DATASETS
+# no --datasets: runs config.RUN_DATASETS (paul15)
 python train.py
 
 # a dataset that is not built in (file layout: comet/README_DATASETS.md)
 python train.py --new-dataset name=my_ds base=/path/to/my_ds cell_type_col=cell_type pseudotime_col=pseudotime
 ```
 
-Built-in datasets: `hema`, `aml89`, `paul15`, `ma2020` and `nestorowa`. Their paths are in `config.BASES`
-(`comet/scripts/build_nestorowa.py` builds the nestorowa directory from public data). `--out-dir DIR` writes to
+Built-in datasets: `hema`, `aml89`, `paul15`, `ma2020` and `nestorowa`. Their paths are in `config.BASES` (see
+[Data](#data); `comet/scripts/build_nestorowa.py` builds the nestorowa directory from public data). `--out-dir DIR` writes to
 `DIR/<name>/` instead of `config.OUT_DIR`.
 Cell types and the reference pseudotime are loaded only for plots and validation; the method never uses them.
 
@@ -69,8 +77,8 @@ the dataset's output folder, to rerun.
 
 ```python
 import train
-bundles, results = train.run(["hema"], train=False)       # same as --trajectory-only
-q, V = results["hema"]["q_commit"], results["hema"]["V_pred"]
+bundles, results = train.run(["paul15"], train=False)     # same as --trajectory-only
+q, V = results["paul15"]["q_commit"], results["paul15"]["V_pred"]
 ```
 
 To run the trajectory directly on a loaded `Bundle`:
@@ -81,7 +89,7 @@ from config import BASES
 from utils.committor import moment_operator
 from utils.trajectory import final_trajectory
 
-b = LOADERS["hema"](BASES["hema"])
+b = LOADERS["paul15"](BASES["paul15"])
 traj = final_trajectory(b, b.Z_dec, moment_operator(b.Z_dec, 15), sign=+1)
 traj["q"], traj["root_mask"], traj["sink_mask"], traj["V"]
 ```
@@ -148,16 +156,15 @@ comet/
   comet_arrow_pseudotime.py pseudotime as the scalar potential of a 2D arrow field (evaluation)
   generate_priors.py        build the GRN prior (peak_tf / peak_gene / peaks / tf_names) for a new dataset
   scripts/                  GRN evaluation against BEELINE references; paul15 ATAC trimming; nestorowa dataset build
+  results_final/            figures from a full run of all five datasets
   README_DATASETS.md        file format for new datasets
+paul2015data_clean/         the paul15 dataset (Git LFS)
+decipher_run/               notebooks that train Decipher and export decipher_embeddings.npz (hema)
+figures/                    paper figures; the notebooks read the precomputed metrics in figures/data/
+notebooks/                  hema ATAC processing, CellOracle base GRN, result inspection
+scripts/                    HOMER annotation parsing and TF-gene matrix construction (GRN prior inputs)
+data/                       hema peak / TF / gene lists used to build its GRN prior
 trajectory_benchmarking/
-  final_method_writeup.md          method, equations, results, next steps
-  final_trajectory_testing.ipynb   final pipeline: K stability, lead nulls, fusion ablation, pseudotime check
-  new_trajectory_experiments.ipynb development: origin sweeps, lead formulations, combination sweeps
-  root_finding_method.md           write-up of the cluster-median root selector
+  final_method_writeup.md   method, equations, results, next steps
+  root_finding_method.md    write-up of the cluster-median root selector
 ```
-
-The notebooks add `comet/` to `sys.path` through the `COMET_REPO` path in their first cell (edit it if the repo
-lives elsewhere), and they save figures under `trajectory_benchmarking/comet_out_beta_sweep/`.
-`new_trajectory_experiments.ipynb` and `comet_beta_pseudotime_three_datasets.ipynb` are kept as a record with their
-outputs; they use code that has since been removed (the legacy committor root, the trained velocity head), so
-rerunning them needs commit `7dda8bf` or earlier.

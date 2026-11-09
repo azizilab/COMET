@@ -24,10 +24,10 @@ Self-edges excluded. Ground-truth positives are reference edges lying inside the
 candidate universe. Matching is case-insensitive (BEELINE symbols are uppercase).
 
 Usage:
-  python eval_grn_beeline.py --run /home/elicanter/nestorowa_test_output/ \
-      --h5ad /home/elicanter/datasets/nestorowa_mhsc_e/Nestorowa_mHSC_E.h5ad \
+  python scripts/eval_grn_beeline.py --run comet_out_trajectory_final/nestorowa \
+      --h5ad ../datasets/nestorowa/rna.h5ad \
       [--panel] [--grn learned]
-Networks are read from datasets/_beeline_raw/networks/Networks/mouse by default.
+Networks are read from $BEELINE_DATA/networks/Networks/mouse (default BEELINE_DATA: <repo>/datasets/_beeline_raw).
 """
 
 import argparse
@@ -37,7 +37,11 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score, average_precision_score
 
-NET_DIR = "/home/elicanter/datasets/_beeline_raw/networks/Networks/mouse"
+# BEELINE reference data (networks/ and BEELINE-data/ from https://github.com/Murali-group/Beeline):
+# $BEELINE_DATA, or <repo>/datasets/_beeline_raw by default.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BEELINE_DATA = os.environ.get("BEELINE_DATA", os.path.join(REPO_ROOT, "datasets", "_beeline_raw"))
+NET_DIR = os.path.join(BEELINE_DATA, "networks", "Networks", "mouse")
 NETWORKS = {
     "mHSC-ChIP-seq": "mHSC-ChIP-seq-network.csv",
     "Non-Specific-ChIP": "Non-Specific-ChIP-seq-network.csv",

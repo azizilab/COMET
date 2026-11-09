@@ -1,7 +1,13 @@
 """All metric computation for benchmark_figures_new_metrics.ipynb (COMET vs scKINETICS vs CellRank).
 The notebook imports this module, calls the functions below per dataset and does all plotting itself.
 Self-contained copy of recomb_bench/pipelines/new_metrics.py (code depends on nothing but standard packages;
-reads data and caches from the absolute paths below).
+reads data and caches from the paths below, set by environment variables).
+Only needed to RECOMPUTE the metrics: the notebook's default (USE_PRECOMPUTED = True) reads figures/data/*.csv instead.
+Recomputing needs the external benchmark tree (scKINETICS / CellRank fields, velocity looms), which is not in this repo:
+  COMET_BENCH_DIR   recomb_bench directory               (default <repo>/trajectory_benchmarking/recomb_bench)
+  COMET_BENCH_DATA  benchmark_data directory             (default <repo>/datasets/benchmark_data)
+  COMET_DATA_ROOT   dataset directories, as in config.py (default <repo>/datasets)
+  COMET_RUN         COMET run to benchmark               (default <repo>/comet/comet_outputs_post_review)
 
 COMET's field is the FULL COMET field: committor direction + chromatin lead (utils/trajectory.final_trajectory;
 the lead's ATAC-RNA gate is off on aml89 and ma2020, as in COMET itself) + the regulatory-consistency GRN tilt
@@ -30,13 +36,14 @@ from scipy.stats import rankdata
 from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
 
-RB = "/home/sc5625/cll_project/decipher_atac_project/COMET/trajectory_benchmarking/recomb_bench"
-TB = os.path.dirname(RB); BD = "/home/sc5625/cll_project/decipher_atac_project/benchmark_data"
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_ROOT = os.environ.get("COMET_DATA_ROOT", os.path.join(REPO_ROOT, "datasets"))
+RB = os.environ.get("COMET_BENCH_DIR", os.path.join(REPO_ROOT, "trajectory_benchmarking", "recomb_bench"))
+TB = os.path.dirname(RB); BD = os.environ.get("COMET_BENCH_DATA", os.path.join(DATA_ROOT, "benchmark_data"))
 # COMET run to benchmark: train.py --out-dir comet_outputs_post_review (post-review: no linear decoder, leak-free
 # encoder, no coherence scaling of the lead; per-module target access prior, top-10% edge pruning in the tilt).
 # V_pred.npy there already includes the GRN tilt.
-RF = os.environ.get("COMET_RUN", "/home/sc5625/cll_project/decipher_atac_project/COMET/comet/comet_outputs_post_review")
-# previous run: .../comet/results_final_merge (set COMET_RUN to it to reproduce the pre-review figures)
+RF = os.environ.get("COMET_RUN", os.path.join(REPO_ROOT, "comet", "comet_outputs_post_review"))
 VEL_CACHE = f"{RB}/results_new_metrics/per_cell"          # each method's gene-space velocity (built once)
 
 K_NN, BETA, W_CONN, K_STEPS = 30, 10.0, 0.2, 30
@@ -59,32 +66,31 @@ def load_obs(ds):
     obs DataFrame indexed by cell id with cell_type, stage and, where available, facs_pseudotime / beeline_pt_*"""
     import anndata as ad
     from sklearn.model_selection import train_test_split
-    B = "/home/sc5625/cll_project/decipher_atac_project/"
     if ds == "hema":
-        a = ad.read_h5ad(B + "COMET/trajectory_benchmarking/DATA/velten_rna.h5ad", backed="r")
+        a = ad.read_h5ad(f"{DATA_ROOT}/hema/velten_rna.h5ad", backed="r")
         obs = a.obs[["facs_pseudotime"]].copy()
-        ct = pd.read_csv(B + "COMET/trajectory_benchmarking/RESULTS/bench/celltypes.csv", index_col=0)["celltype"]
+        ct = pd.read_csv(f"{TB}/RESULTS/bench/celltypes.csv", index_col=0)["celltype"]
         obs["cell_type"] = ct.reindex(obs.index).astype(str).values
         smap = {"HSC": 0, "MPP": 1, "CMP": 2, "MLP": 2, "MEP": 3, "GMP": 3}
     elif ds == "aml89":
-        a = ad.read_h5ad(B + "aml89/08H089_allsorted_cleaned.h5", backed="r")
+        a = ad.read_h5ad(f"{DATA_ROOT}/aml89/08H089_allsorted_cleaned.h5", backed="r")
         strat = a.obs["blast_cell_type_08H089"].values
         _, keep = train_test_split(np.arange(a.n_obs), test_size=5000, stratify=strat, random_state=42)
         obs = a.obs.iloc[np.sort(keep)][["blast_cell_type_08H089", "sample", "dm_0_rank"]].copy()
         obs["cell_type"] = obs.pop("blast_cell_type_08H089").astype(str)
         smap = {"immature": 0, "blast0": 1, "blast1": 2, "blast2": 3, "blast3": 4}
     elif ds == "paul15":
-        a = ad.read_h5ad(B + "COMET/paul2015data_clean/Paul_etal_15_2.h5ad", backed="r")
+        a = ad.read_h5ad(f"{REPO_ROOT}/paul2015data_clean/Paul_etal_15_2.h5ad", backed="r")
         obs = a.obs[["cell_type"]].astype(str).copy()
         smap = {"MEP": 0, "GMP": 0, "late_GMP": 1, "Erythroids": 2, "Megakaryocytes": 2,
                 "Granulocytes": 2, "Monocytes": 2}
     elif ds == "nestorowa":
-        a = ad.read_h5ad(B + "nestorowa_mhsc_all/rna.h5ad", backed="r")
+        a = ad.read_h5ad(f"{DATA_ROOT}/nestorowa/rna.h5ad", backed="r")
         obs = a.obs[["cell_type", "beeline_pt_E", "beeline_pt_GM", "beeline_pt_L"]].copy()
         obs["cell_type"] = obs.cell_type.astype(str)
         smap = {"LT-HSC": 0, "MPP": 1, "CMP": 2, "LMPP": 2, "GMP": 3, "MEP": 3}
     elif ds == "ma2020":
-        a = ad.read_h5ad(B + "decipher-atac/paired/Ma-2020-RNA.h5ad", backed="r")
+        a = ad.read_h5ad(f"{DATA_ROOT}/ma2020/Ma-2020-RNA.h5ad", backed="r")
         KEEP = ["TAC-1", "TAC-2", "IRS", "Hair Shaft-Cuticle/Cortex", "Medulla"]
         obs = a.obs[a.obs.cell_type.astype(str).isin(KEEP).values][["cell_type"]].astype(str).copy()
         smap = {"TAC-1": 0, "TAC-2": 1, "IRS": 2, "Hair Shaft-Cuticle/Cortex": 2, "Medulla": 2}

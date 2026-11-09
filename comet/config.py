@@ -2,14 +2,18 @@ import os
 
 # ── datasets ──────────────────────────────────────────────────────────────────
 # Every dataset in BASES is registered; `python train.py` with no --datasets runs RUN_DATASETS.
-RUN_DATASETS = ["hema", "ma2020", "aml89"]
+RUN_DATASETS = ["paul15"]
 
+# paul15 ships with the repo (paul2015data_clean/, via Git LFS). The other datasets are not in the repo: put each in
+# <DATA_ROOT>/<name>/ (file layouts: data/load.py), where DATA_ROOT is $COMET_DATA_ROOT or <repo>/datasets.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_ROOT = os.environ.get("COMET_DATA_ROOT", os.path.join(REPO_ROOT, "datasets"))
 BASES = {
-    "hema":      "/home/sc5625/cll_project/decipher_atac_project/m_atac_pipeline",
-    "aml89":     "/home/sc5625/cll_project/decipher_atac_project/aml89",
-    "ma2020":    "/home/sc5625/cll_project/decipher_atac_project/decipher-atac/paired",
-    "nestorowa": "/home/sc5625/cll_project/decipher_atac_project/nestorowa_mhsc_all",
-    "paul15":    "/home/sc5625/cll_project/decipher_atac_project/COMET/paul2015data_clean",
+    "hema":      os.path.join(DATA_ROOT, "hema"),
+    "aml89":     os.path.join(DATA_ROOT, "aml89"),
+    "ma2020":    os.path.join(DATA_ROOT, "ma2020"),
+    "nestorowa": os.path.join(DATA_ROOT, "nestorowa"),
+    "paul15":    os.path.join(REPO_ROOT, "paul2015data_clean"),
 }
 OUT_DIR = "comet_out_trajectory_final"
 os.makedirs(OUT_DIR, exist_ok=True)
