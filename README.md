@@ -1,16 +1,7 @@
 # COMET
 
-COMET infers differentiation trajectories from single-cell RNA and ATAC data, paired or unpaired, without cell-type
-labels or a reference pseudotime.
-
-1. The origin is found from chromatin accessibility: the cells with the most open chromatin (or the least open, for
-   aml89; see `ORIGIN_SIGN`).
-2. Pseudotime is the committor on a kNN graph, from 0 at the origin to 1 at the terminal cells.
-3. A per-cell gene regulatory network is learned on top of a motif prior from the ATAC peaks.
-4. The velocity field follows the pseudotime gradient, uses the chromatin lead where pseudotime is flat, and is tilted
-   toward the direction each cell's GRN explains.
-
-The full method is in [`method.md`](method.md).
+COMET infers single-cell GRNs and differentiation trajectories from paired or unpaired single-cell RNA and ATAC data,
+without cell-type labels or a reference pseudotime. The method is described in [`method.md`](method.md).
 
 ## Install
 
@@ -32,8 +23,7 @@ cloning). For the other datasets (`hema`, `aml89`, `ma2020`, `nestorowa`), put e
 From `comet/`:
 
 ```bash
-python train.py --datasets paul15                    # trajectory + GRN
-python train.py --datasets paul15 --trajectory-only  # skip the GRN (and the GRN tilt)
+python train.py --datasets paul15
 python train.py --new-dataset name=my_ds base=/path/to/my_ds
 ```
 
@@ -55,7 +45,7 @@ rather than recomputed unless `FORCE_RERUN = True`. All settings are in `comet/c
 | `committor_q.npy` | pseudotime |
 | `root_mask.npy`, `sink_mask.npy` | origin and terminal cells |
 | `V_pred.npy` | velocity field (cells × genes) |
-| `V_pred_grn_independent.npy` | velocity field before the GRN tilt |
+| `V_pred_grn_independent.npy` | velocity field without the GRN's contribution |
 | `A_learned.npy`, `A_genes.npy`, `A_tfs.npy` | learned GRN (genes × TFs) and its labels |
 | `<name>_clean_quiver.png`, `<name>_celltypes_pseudotime.png` | velocity and pseudotime plots |
 
