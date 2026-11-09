@@ -4,12 +4,13 @@ This document describes exactly what the code in `comet/` computes, from raw fil
 number below is the default in `comet/config.py`; the function that implements each step is given in brackets.
 Results and validation are in [`trajectory_benchmarking/final_method_writeup.md`](trajectory_benchmarking/final_method_writeup.md).
 
-COMET has two independent outputs computed from the same preprocessed data:
+COMET has two outputs computed from the same preprocessed data:
 
-* **Trajectory** (§4): a root, terminal states, a pseudotime q ∈ [0, 1] and a gene-space velocity field V. Nothing
-  is trained and no labels are used.
+* **Trajectory** (§4): a root, terminal states, a pseudotime q ∈ [0, 1] and a gene-space velocity field V. No
+  labels are used.
 * **GRN dictionary** (§5): a TF → gene regulatory network made of a shared base plus D = 4 lineage atoms, with
-  per-cell mixing weights. It is trained, and it does not feed into the trajectory.
+  per-cell mixing weights. After training, it tilts V toward the direction each cell's regulons explain
+  (`regulatory_consistency_tilt` in `comet/utils/trajectory.py`).
 
 ```
 raw RNA counts ─┐                          ┌─ §4 trajectory: origin score → root → sinks → committor q → V
