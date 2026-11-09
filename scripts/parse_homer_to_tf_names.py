@@ -1,20 +1,11 @@
 """
-parse_homer_to_tf_names.py  (v3 - final)
------------------------------------------
-Converts HOMER annotatePeaks output → peak_motifs.csv with clean TF gene names
-that will actually match adata.var_names downstream.
+Convert HOMER annotatePeaks output to peak_motifs.csv, with TF gene symbols that match adata.var_names.
 
-Key fixes vs previous versions:
-  1. Extracts clean gene symbols from motifN.motif headers
-     e.g. "BestGuess:IRF8(IRF)/BMDM..." → "IRF8"
-          "BestGuess:PB0058.1_Sfpi1_1/Jaspar" → "Sfpi1"
-  2. Falls back to knownResults.txt rank N for any unmapped index
-  3. De-duplicates the 3 length variants (8/10/12-mer) per motif index —
-     a peak only needs ONE length variant to have a hit to count.
-     This avoids triple-counting and reduces noise.
-  4. Applies a coverage filter: drops motifs hitting >max_coverage of all peaks
-     (degenerate/noisy motifs not worth including as TF features).
-  5. Outputs clean gene symbols only — no consensus sequences in tf_name.
+  1. Gene symbols are taken from the motifN.motif headers,
+     e.g. "BestGuess:IRF8(IRF)/BMDM..." -> "IRF8", "BestGuess:PB0058.1_Sfpi1_1/Jaspar" -> "Sfpi1";
+     unmapped indices fall back to rank N in knownResults.txt.
+  2. The 8/10/12-mer length variants of a motif index are collapsed: a peak is a hit if any variant hits.
+  3. Motifs hitting more than --max-coverage of all peaks are dropped as uninformative.
 
 Usage:
     python parse_homer_to_tf_names.py \

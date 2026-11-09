@@ -1,5 +1,5 @@
 """
-Set up and run the OFFICIAL BEELINE evaluator (BLEval) on a COSMOS GRN run,
+Set up and run the OFFICIAL BEELINE evaluator (BLEval) on a COMET GRN run,
 then draw a clean single-method summary figure.
 
 Unlike scripts/eval_grn_beeline.py (a lightweight reimplementation for fast
@@ -7,14 +7,14 @@ iteration), this stages the directory layout the official tool expects and
 invokes Murali-group/Beeline's real BLEvaluator.py CLI, so AUPRC / AUROC /
 EarlyPrecision use BEELINE's exact conventions and are comparable to published
 results. BEELINE's own BLPlotter is built for many-algorithm x many-dataset
-grids and looks broken for a single method, so we draw our own figure instead.
+grids, so a single-method summary figure is drawn here instead.
 
 Gene panel (--panel N)
 ----------------------
 The BEELINE convention for real scRNA-seq is "all significantly-varying TFs +
 the top-N most-varying genes" (N = 500 and 1000). Pass --panel 500 or 1000 to
-score on that panel (targets = top-N varying genes that COSMOS models, plus all
-TFs; regulators = all TFs). --panel 0 (default) uses COSMOS's full gene universe.
+score on that panel (targets = top-N varying genes that COMET models, plus all
+TFs; regulators = all TFs). --panel 0 (default) uses COMET's full gene universe.
 Top-N ranking comes from BEELINE's GeneOrdering.csv (--gene-ordering).
 
 SIMPLE ONE-COMMAND USAGE
@@ -22,7 +22,7 @@ SIMPLE ONE-COMMAND USAGE
   python scripts/run_bleval.py --run comet_out_trajectory_final/<dataset> --panel 1000
 
   # add --grn learned|base|mixture (default learned)
-  # add --label COSMOS  (name shown in the figure; default COSMOS)
+  # add --label NAME  (name shown in the figure; default COMET)
 Outputs: <run>/bleval/  ->  outputs/.../<label>/... (metric CSVs)
                             figures/<label>_summary.png  (+ .pdf)
 Any env with pandas/sklearn/pyyaml/matplotlib works (e.g. decipher-env).
@@ -78,7 +78,7 @@ def build_ranked_edges(A_genes, A_tfs, absW):
 
 
 def make_universe(A_genes, A_tfs, panel_n, gene_ordering):
-    """Gene universe to score over. panel_n=0 -> full COSMOS universe;
+    """Gene universe to score over. panel_n=0 -> full COMET universe;
     else all TFs + top-N most-varying genes (BEELINE convention)."""
     genes_u = set(np.char.upper(A_genes.astype(str)))
     tfs_u = set(np.char.upper(A_tfs.astype(str)))
@@ -87,7 +87,7 @@ def make_universe(A_genes, A_tfs, panel_n, gene_ordering):
     go = pd.read_csv(gene_ordering, index_col=0)
     var_col = "Variance" if "Variance" in go.columns else go.columns[-1]
     ranked = [str(x).upper() for x in go.sort_values(var_col, ascending=False).index]
-    top = [x for x in ranked if x in genes_u][:panel_n]     # top-N genes COSMOS models
+    top = [x for x in ranked if x in genes_u][:panel_n]     # top-N genes COMET models
     return set(top) | tfs_u, f"TFs + top {panel_n} HVGs"
 
 
@@ -144,7 +144,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
     ap.add_argument("--grn", default="learned", choices=["learned", "base", "mixture"])
-    ap.add_argument("--label", default="COSMOS", help="method name shown in the figure")
+    ap.add_argument("--label", default="COMET", help="method name shown in the figure")
     ap.add_argument("--panel", type=int, default=0,
                     help="0=full universe; 500/1000=all TFs + top-N varying genes")
     ap.add_argument("--gene-ordering", default=DEFAULT_GENE_ORDERING)

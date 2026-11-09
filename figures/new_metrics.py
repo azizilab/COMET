@@ -40,9 +40,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_ROOT = os.environ.get("COMET_DATA_ROOT", os.path.join(REPO_ROOT, "datasets"))
 RB = os.environ.get("COMET_BENCH_DIR", os.path.join(REPO_ROOT, "trajectory_benchmarking", "recomb_bench"))
 TB = os.path.dirname(RB); BD = os.environ.get("COMET_BENCH_DATA", os.path.join(DATA_ROOT, "benchmark_data"))
-# COMET run to benchmark: train.py --out-dir comet_outputs_post_review (post-review: no linear decoder, leak-free
-# encoder, no coherence scaling of the lead; per-module target access prior, top-10% edge pruning in the tilt).
-# V_pred.npy there already includes the GRN tilt.
+# COMET run to benchmark (train.py --out-dir comet_outputs_post_review); its V_pred.npy includes the GRN tilt.
 RF = os.environ.get("COMET_RUN", os.path.join(REPO_ROOT, "comet", "comet_outputs_post_review"))
 VEL_CACHE = f"{RB}/results_new_metrics/per_cell"          # each method's gene-space velocity (built once)
 

@@ -240,7 +240,7 @@ def main():
     ap = argparse.ArgumentParser(description="Mask-conditional GRN evaluation.")
     ap.add_argument("--run", required=True)
     ap.add_argument("--grn", default="learned", choices=["learned", "base", "mixture"])
-    ap.add_argument("--label", default="COSMOS")
+    ap.add_argument("--label", default="COMET")
     ap.add_argument("--panel", type=int, default=0,
                     help="0=full universe; 500/1000=all TFs + top-N varying genes")
     ap.add_argument("--normalize", default="none", choices=NORMALIZATIONS,

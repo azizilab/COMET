@@ -22,7 +22,7 @@ if "distance" in peak_gene.columns:
 else:
     print("WARNING: no distance column")
 
-# OPTIONAL: restrict to protein coding (recommended)
+# restrict to protein-coding genes when the biotype is available
 if "gene_biotype" in peak_gene.columns:
     before = len(peak_gene)
     peak_gene = peak_gene[peak_gene["gene_biotype"] == "protein_coding"].copy()
@@ -36,7 +36,7 @@ velten = ad.read_h5ad("velten_rna.h5ad")
 rna_genes = list(velten.var_names)
 
 # --------------------------------------------------
-# Normalization (CRITICAL: do NOT destroy symbols)
+# Gene-symbol matching (case-insensitive, version suffix dropped)
 # --------------------------------------------------
 def norm(x):
     return str(x).split(".")[0].upper()
@@ -49,7 +49,7 @@ for g in rna_genes:
         norm_to_orig[k] = g
 
 # --------------------------------------------------
-# Peak indexing (fix dash vs colon mismatch)
+# Peak indexing (peaks.txt uses chr-start-end, peak_gene uses chr:start-end)
 # --------------------------------------------------
 def fix_peak(p):
     return p.replace("-", ":", 1)
