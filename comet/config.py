@@ -27,7 +27,7 @@ AML_TARGET_CELLS = 5000
 MA_KEEP = ["TAC-1", "TAC-2", "IRS", "Hair Shaft-Cuticle/Cortex", "Medulla"]
 MA_PSEUDOBULK_SMOOTH = True  # pseudo-bulk ma2020's paired ATAC over RNA clusters (each cluster's own cells); False = per cell
 
-# ── trajectory (utils/trajectory.py; trajectory_benchmarking/final_method_writeup.md) ──
+# ── trajectory (utils/trajectory.py; method.md §4) ──
 # consensus chromatin origin -> committor -> chromatin-lead plateau fill-in. Nothing here is trained.
 TRAIN_GRN          = True      # False = trajectory only (no GRN training); same as --trajectory-only
 TRAJ_ATAC_RES      = (120, 8, 15)  # origin score: pseudo-bulk clusters, matched ATAC cells per cluster, kNN smooth

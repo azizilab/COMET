@@ -1,6 +1,6 @@
 """Final COMET trajectory formulation (consensus chromatin origin -> committor -> chromatin-lead fill-in).
 
-The math is written up in method.md and trajectory_benchmarking/final_method_writeup.md.
+The math is written up in method.md §4.
 
     origin score  phi = s · [z(chromatin entropy) + z(breadth)] of a finer (120-cluster) pseudo-bulk ATAC
     root          consensus over K in [3, 1/(2·ROOT_FRAC)] × seeds of the cluster-median rule (KMeans on Z,

@@ -2,7 +2,6 @@
 
 This document describes exactly what the code in `comet/` computes, from raw files to figures. Every
 number below is the default in `comet/config.py`; the function that implements each step is given in brackets.
-Results and validation are in [`trajectory_benchmarking/final_method_writeup.md`](trajectory_benchmarking/final_method_writeup.md).
 
 COMET has two outputs computed from the same preprocessed data:
 

@@ -60,5 +60,4 @@ paul2015data_clean/       paul15 data
 figures/                  paper figures (from the precomputed metrics in figures/data/)
 decipher_run/             Decipher embeddings for hema
 notebooks/, scripts/, data/   hema ATAC and GRN prior preprocessing
-trajectory_benchmarking/  method development notes
 ```

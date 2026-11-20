@@ -4,7 +4,8 @@ Self-contained copy of recomb_bench/pipelines/new_metrics.py (code depends on no
 reads data and caches from the paths below, set by environment variables).
 Only needed to RECOMPUTE the metrics: the notebook's default (USE_PRECOMPUTED = True) reads figures/data/*.csv instead.
 Recomputing needs the external benchmark tree (scKINETICS / CellRank fields, velocity looms), which is not in this repo:
-  COMET_BENCH_DIR   recomb_bench directory               (default <repo>/trajectory_benchmarking/recomb_bench)
+  COMET_BENCH_DIR   recomb_bench directory; its parent also holds RESULTS/ and bio_figures/
+                                                         (default <repo>/datasets/trajectory_benchmarking/recomb_bench)
   COMET_BENCH_DATA  benchmark_data directory             (default <repo>/datasets/benchmark_data)
   COMET_DATA_ROOT   dataset directories, as in config.py (default <repo>/datasets)
   COMET_RUN         COMET run to benchmark               (default <repo>/comet/comet_outputs_post_review)
@@ -38,7 +39,7 @@ from sklearn.neighbors import NearestNeighbors
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_ROOT = os.environ.get("COMET_DATA_ROOT", os.path.join(REPO_ROOT, "datasets"))
-RB = os.environ.get("COMET_BENCH_DIR", os.path.join(REPO_ROOT, "trajectory_benchmarking", "recomb_bench"))
+RB = os.environ.get("COMET_BENCH_DIR", os.path.join(DATA_ROOT, "trajectory_benchmarking", "recomb_bench"))
 TB = os.path.dirname(RB); BD = os.environ.get("COMET_BENCH_DATA", os.path.join(DATA_ROOT, "benchmark_data"))
 # COMET run to benchmark (train.py --out-dir comet_outputs_post_review); its V_pred.npy includes the GRN tilt.
 RF = os.environ.get("COMET_RUN", os.path.join(REPO_ROOT, "comet", "comet_outputs_post_review"))
