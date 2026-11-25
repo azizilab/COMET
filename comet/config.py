@@ -25,6 +25,8 @@ MA_PSEUDOBULK_SMOOTH = True  # pseudo-bulk ma2020's paired ATAC over RNA cluster
 
 # ── trajectory (utils/trajectory.py; trajectory_benchmarking/final_method_writeup.md) ──
 # consensus chromatin origin -> committor -> chromatin-lead plateau fill-in. Nothing here is trained.
+GRN_MODEL          = "v2"      # "v2": COMET v2 GRN (training/grn_v2.py, the v28 T3_auto recipe); "v1": published dictionary (train_grn)
+GRN_V2_RECIPE      = {}        # overrides of training/grn_v2.T3 (e.g. dict(init="cold")); empty = the frozen recipe
 TRAIN_GRN          = True      # False = trajectory only (no GRN training); same as --trajectory-only
 TRAJ_ATAC_RES      = (120, 8, 15)  # origin score: pseudo-bulk clusters, matched ATAC cells per cluster, kNN smooth
 TRAJ_ROOT_FRAC     = 0.05      # root size; the consensus K range is [3, 1/(2·TRAJ_ROOT_FRAC)]

@@ -10,6 +10,7 @@ from config import (
     D_ATOMS, N_EPOCHS, PHASE1_EPOCHS, BATCH_SIZE, GEO_TAU_SCALE,
     TARGET_CELLS_PER_EPOCH, TARGET_CELLS_PER_EPOCH_PHASE2, FORCE_RERUN, ORIGIN_SIGN,
     STATE_SPACE, VEL_MOMENT_KNN, K_MOMENT, RANDOM_STATE, W1, W2, LR_GRN, TRAIN_GRN, GRN_TILT_LAMBDA,
+    GRN_MODEL, GRN_V2_RECIPE,
 )
 from utils.common import zscore_cols
 from utils.committor import moment_operator
@@ -193,7 +194,13 @@ def run_comet(b, out_dir, train=None):
 
     # ---- GRN ----
     if train:
-        g = train_grn(b, Zst)
+        if GRN_MODEL == "v2":
+            from training.grn_v2 import train_grn_v2
+            g = train_grn_v2(b, Zst, traj, GRN_V2_RECIPE)
+            _save(out_dir, b_base=g["b_base"], b_dict=g["b_dict"], fates=g["fates"], omega=g["omega"])
+            with open(os.path.join(out_dir, "grn_v2_diag.txt"), "w") as fh: fh.write(repr(g["diag"]) + "\n")
+        else:
+            g = train_grn(b, Zst)
         _save(out_dir, A_dict=g["A_dict"], A_base=g["A_base"], A_learned=g["A_learned"], mix_weights=g["mix"],
               steady_state=g["steady_state"], A_genes=b.A_genes, A_tfs=b.A_tfs, loss_history=g["loss_history"])
         out.update(grn=g["grn"], cell_encoder=g["cell_encoder"], mix=g["mix"], A_learned=g["A_learned"],

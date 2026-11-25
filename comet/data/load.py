@@ -26,6 +26,8 @@ class Bundle:
     tf_indices_in_G: np.ndarray; Z_dec: np.ndarray; V_dec2: np.ndarray
     cell_types: np.ndarray; pseudo_norm: np.ndarray; gene_access: np.ndarray
     adata: Optional[ad.AnnData] = None
+    counts: Optional[object] = None   # raw counts (N, G) of A_genes, csr; COMET v2 count splitting (training/grn_v2.py)
+    lib: Optional[np.ndarray] = None  # total raw counts per cell over all genes
     ga_true: Optional[np.ndarray] = None
     sub_g2i: dict = field(default_factory=dict)
     # raw per-cell gene activity that ga_matched was pseudo-bulked from (per ATAC cell if unpaired, per RNA cell if
@@ -53,13 +55,22 @@ def finish_bundle(name, paired, rna_adata, X_full, gene_names_all, gene_to_idx_f
     ga = knn_smooth(ga, ni, k=K_MOMENT)                    # single upstream denoise step
     gacc = ga.mean(0); gacc = (gacc - gacc.min()) / (gacc.max() - gacc.min() + 1e-8)
     ga_true = (raw_ga.astype(np.float32) if raw_ga is not None else ga) if paired else None
+    C_all = rna_adata.layers.get("comet_counts") if rna_adata is not None else None
+    counts = lib = None
+    if C_all is not None and C_all.shape[0] == X.shape[0]:
+        counts = C_all[:, gene_idx].tocsr(); lib = np.asarray(C_all.sum(1)).ravel().astype(np.float64)
     return Bundle(name=name, paired=paired, X=X, X_TF=X_TF, ga_matched=ga,
                   M=M.astype(np.float32), A_genes=A_genes, A_tfs=A_tfs,
                   tf_indices_in_G=tf_indices_in_G, Z_dec=Z_dec.astype(np.float32),
                   V_dec2=V_dec2.astype(np.float32), cell_types=np.asarray(cell_types).astype(str),
                   pseudo_norm=pseudo_norm.astype(np.float32), gene_access=gacc.astype(np.float32),
-                  adata=adata, ga_true=ga_true, sub_g2i=sub_g2i,
+                  adata=adata, ga_true=ga_true, sub_g2i=sub_g2i, counts=counts, lib=lib,
                   ga_atac_cells=None if ga_atac_cells is None else np.asarray(ga_atac_cells, np.float32))
+
+
+def keep_counts(rna, layer=None):
+    """store the raw counts before normalisation (layers['comet_counts']); used by COMET v2 count splitting"""
+    rna.layers["comet_counts"] = csr_matrix(rna.layers[layer] if layer else rna.X, dtype=np.float32)
 
 
 def load_decipher(decipher_dir):
@@ -158,6 +169,7 @@ def load_generic(base, name, rna_file=None, atac_mtx=None, atac_peaks_file=None,
     atac_peaks_file = atac_peaks_file or f"{base}/atac_peaks.txt"
     decipher_npz    = decipher_npz    or f"{base}/decipher_embeddings.npz"
     rna = ad.read_h5ad(rna_file)
+    keep_counts(rna, rna_layer)
     sc.pp.normalize_total(rna, target_sum=1e4, layer=rna_layer)
     sc.pp.log1p(rna, layer=rna_layer)
     sc.pp.highly_variable_genes(rna, n_top_genes=N_TOP_HVG, subset=False, layer=rna_layer)
@@ -254,7 +266,7 @@ def load_hema(base):
     ATAC_PEAKS=f"{base}/GSE129785_scATAC-Hematopoiesis-CD34.peaks.txt.gz"
     DEC_NPZ=f"{base}/models/decipher_outputs2/decipher_embeddings.npz"
     rna = ad.read_h5ad(RNA_H5AD)
-    sc.pp.normalize_total(rna, target_sum=1e4); sc.pp.log1p(rna)
+    keep_counts(rna); sc.pp.normalize_total(rna, target_sum=1e4); sc.pp.log1p(rna)
     sc.pp.highly_variable_genes(rna, n_top_genes=N_TOP_HVG, subset=False)
     hvg = set(rna.var_names[rna.var['highly_variable']])
     gene_names_all = np.array(rna.var_names.astype(str)); g2i = {g:i for i,g in enumerate(gene_names_all)}
@@ -318,7 +330,7 @@ def load_aml89(base, atac_sample_prefix="08H089"):
         strat = rna.obs['blast_cell_type_08H089'].values
         _, keep = train_test_split(chosen, test_size=AML_TARGET_CELLS, stratify=strat, random_state=RANDOM_STATE)
         chosen = np.sort(keep); rna = rna[chosen].copy()
-    sc.pp.normalize_total(rna, target_sum=1e4); sc.pp.log1p(rna)
+    keep_counts(rna); sc.pp.normalize_total(rna, target_sum=1e4); sc.pp.log1p(rna)
     sc.pp.highly_variable_genes(rna, n_top_genes=N_TOP_HVG, subset=False)
     hvg = set(rna.var_names[rna.var['highly_variable']])
     gene_names_all = np.array(rna.var_names.astype(str)); g2i = {g:i for i,g in enumerate(gene_names_all)}
@@ -380,7 +392,7 @@ def load_ma2020(base, target_cells=MA_TARGET_CELLS):
     if target_cells and rna.n_obs > target_cells:
         _, keep2 = train_test_split(order, test_size=target_cells, stratify=rna.obs["cell_type"].values, random_state=RANDOM_STATE)
         keep2 = np.sort(keep2); rna = rna[keep2].copy(); atac = atac[keep2].copy(); Z_dec, V_dec2 = Z_dec[keep2], V_dec2[keep2]
-    sc.pp.normalize_total(rna, target_sum=1e4); sc.pp.log1p(rna)
+    keep_counts(rna); sc.pp.normalize_total(rna, target_sum=1e4); sc.pp.log1p(rna)
     sc.pp.highly_variable_genes(rna, n_top_genes=N_TOP_HVG, subset=False)
     hvg = set(rna.var_names[rna.var['highly_variable']])
     gene_names_all = np.array(rna.var_names.astype(str)); g2i = {g:i for i,g in enumerate(gene_names_all)}
